@@ -1,0 +1,33 @@
+services:
+  nova-filemanager:
+    image: justxforxdocker/nova-filemanager:latest
+    container_name: nova-filemanager
+    restart: unless-stopped
+    privileged: true
+    ports:
+      - "9898:9898"
+    volumes:
+      - /:/hostroot:rw
+    environment:
+      - ROOT_PATH=/hostroot
+      - PORT=9898
+      - NODE_ENV=production
+      - LOG_LEVEL=info
+      - LOG_FORMAT=pretty
+      - COPY_WORKERS=4
+      # Ollama AI (optional) — set OLLAMA_URL to your Ollama host
+      - OLLAMA_URL=http://host-gateway:11434
+      - OLLAMA_TEXT_MODEL=llama3.2:1b
+      - OLLAMA_VISION_MODEL=moondream:latest
+      - OLLAMA_EMBED_MODEL=nomic-embed-text:latest
+      # Gotify notifications (optional)
+      - GOTIFY_URL=
+      - GOTIFY_TOKEN=
+    extra_hosts:
+      - "host-gateway:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9898/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
