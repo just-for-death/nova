@@ -1,6 +1,43 @@
-# ⬡ Nova File Manager
+<p align="center">
+  <img src=".github/logo.svg" alt="Nova File Manager" width="380"/>
+</p>
 
-A fast, modern, self-hosted file manager for Docker. Manage your entire server filesystem from a clean browser UI — with background jobs, a built-in text editor, AI features, and PWA support.
+<p align="center">
+  <strong>Your files. Your server. Your rules.</strong><br/>
+  A fast, modern, self-hosted file manager built for Docker.
+</p>
+
+<p align="center">
+  <a href="https://github.com/just-for-death/nova/releases"><img src="https://img.shields.io/github/v/release/just-for-death/nova?style=flat-square&color=c4663a&label=release" alt="release"/></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-flat-square?style=flat-square&color=5a8fcc" alt="license"/></a>
+  <a href="https://hub.docker.com/r/just-for-death/nova"><img src="https://img.shields.io/docker/pulls/just-for-death/nova?style=flat-square&color=5aaa78&label=docker pulls" alt="docker pulls"/></a>
+  <a href="https://github.com/just-for-death/nova/stargazers"><img src="https://img.shields.io/github/stars/just-for-death/nova?style=flat-square&color=c9944a" alt="stars"/></a>
+</p>
+
+<p align="center">
+  <a href="#-quick-start">Quick Start</a> ·
+  <a href="#-features">Features</a> ·
+  <a href="#-ai-features">AI Features</a> ·
+  <a href="#%EF%B8%8F-configuration">Configuration</a> ·
+  <a href="#-screenshots">Screenshots</a>
+</p>
+
+---
+
+## 📸 Screenshots
+
+<p align="center">
+  <img src=".github/screenshots/2-grid-view.png" alt="Nova – Grid View" width="100%"/>
+</p>
+
+<p align="center">
+  <img src=".github/screenshots/3-context-menu.png" alt="Nova – Context Menu" width="49%"/>
+  <img src=".github/screenshots/4-ai-task.png" alt="Nova – AI Task" width="49%"/>
+</p>
+
+<p align="center">
+  <img src=".github/screenshots/5-ai-assistant.png" alt="Nova – AI File Assistant" width="100%"/>
+</p>
 
 ---
 
@@ -29,8 +66,8 @@ A fast, modern, self-hosted file manager for Docker. Manage your entire server f
 
 ```bash
 # 1. Clone
-git clone https://github.com/YOUR_USERNAME/nova-filemanager.git
-cd nova-filemanager
+git clone https://github.com/just-for-death/nova.git
+cd nova
 
 # 2. Configure
 cp .env.example .env
@@ -45,7 +82,7 @@ open http://localhost:9898
 
 ---
 
-## ⚙ Configuration
+## ⚙️ Configuration
 
 All config lives in `.env` (copy from `.env.example`):
 
@@ -66,6 +103,20 @@ All config lives in `.env` (copy from `.env.example`):
 
 ---
 
+## 🤖 AI Features
+
+Nova connects to a local [Ollama](https://ollama.com) instance. **All AI runs locally — nothing is sent to the cloud.**
+
+```bash
+ollama pull llama3.2:1b          # text ops (summarise, rename, tag)
+ollama pull moondream:latest     # image description
+ollama pull nomic-embed-text     # semantic search
+```
+
+Right-click any file or folder to access AI actions. The **AI Task** agent lets you describe what you want done in plain English — it proposes a plan you review before running.
+
+---
+
 ## ⌨ Keyboard Shortcuts
 
 | Key | Action |
@@ -79,20 +130,6 @@ All config lives in `.env` (copy from `.env.example`):
 | `Backspace` | Go back |
 | `Escape` | Deselect / close modal |
 | `Ctrl+S` | Save in editor |
-
----
-
-## 🤖 AI Features (requires Ollama)
-
-Nova connects to a local [Ollama](https://ollama.com) instance. All AI runs locally — nothing is sent to the cloud.
-
-```bash
-ollama pull llama3.2:1b          # text ops (summarise, rename, tag)
-ollama pull moondream:latest     # image description
-ollama pull nomic-embed-text     # semantic search
-```
-
-Right-click any file or folder to access AI actions. The **AI Task** agent (right-click a folder) lets you describe what you want done in plain English — it proposes a plan you review before running.
 
 ---
 
@@ -111,7 +148,7 @@ To switch to human-readable logs: set `LOG_FORMAT=text` in `.env`.
 
 Nova mounts your **entire host filesystem** with `privileged: true`.
 
-**Do not expose it to the internet without authentication.** It is designed for trusted home networks or VPN-only access. Consider fronting with an auth proxy: [Authelia](https://www.authelia.com), [Caddy basicauth](https://caddyserver.com/docs/caddyfile/directives/basicauth), or [Traefik ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/).
+> **Do not expose it to the internet without authentication.** Designed for trusted home networks or VPN-only access. Consider fronting with an auth proxy: [Authelia](https://www.authelia.com), [Caddy basicauth](https://caddyserver.com/docs/caddyfile/directives/basicauth), or [Traefik ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/).
 
 ---
 
@@ -141,4 +178,4 @@ Nova mounts your **entire host filesystem** with `privileged: true`.
 
 ## License
 
-MIT
+MIT © [just-for-death](https://github.com/just-for-death)
