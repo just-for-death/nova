@@ -1382,6 +1382,21 @@ app.post('/api/delete-permanent', (req, res) => {
   });
 });
 
+// SYMLINK — recreate a broken symlink with a new target
+app.post('/api/symlink/recreate', (req, res) => {
+  const { path: p, target } = req.body;
+  if (!p || !target) return res.status(400).json({ error: 'Missing path or target' });
+  const abs = resolvePath(p);
+  try {
+    // Remove the broken link first
+    fs.unlinkSync(abs);
+    // Re-create with new target
+    fs.symlinkSync(target, abs);
+    log('info', 'Symlink recreated', { link: toVirtual(abs), target });
+    res.json({ success: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // EMPTY TRASH ────────────────────────────────────────────────────
 app.post('/api/trash/empty', (req, res) => {
   const { clientId } = req.body;
