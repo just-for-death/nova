@@ -165,6 +165,19 @@ body {
   display: flex; flex-direction: column;
   overflow: hidden;
 }
+.sb-scroll {
+  flex: 1; overflow-y: auto; overflow-x: hidden; min-height: 0;
+  scrollbar-width: thin; scrollbar-color: var(--surface4) transparent;
+}
+.sb-scroll::-webkit-scrollbar { width: 4px; }
+.sb-scroll::-webkit-scrollbar-track { background: transparent; }
+.sb-scroll::-webkit-scrollbar-thumb { background: var(--surface4); border-radius: 2px; }
+.sb-scroll::-webkit-scrollbar-thumb:hover { background: var(--border2); }
+.sb-footer {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  padding: 6px 8px;
+}
 .sb-section { padding: 14px 8px 4px; }
 .sb-label {
   font-size: 10px; font-weight: 600;
@@ -209,6 +222,59 @@ body {
   transition: width 0.6s ease;
 }
 .disk-nums { font-size: 10.5px; color: var(--text3); font-family: var(--font-mono); }
+
+/* ── SETTINGS ─────────────────────────────────────── */
+.settings-group { margin-bottom: 20px; }
+.settings-group-title {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--text3);
+  padding-bottom: 8px; border-bottom: 1px solid var(--border);
+  margin-bottom: 10px; font-family: var(--font-sans);
+}
+.settings-row {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 9px 0; gap: 12px;
+}
+.settings-row + .settings-row { border-top: 1px solid var(--border); }
+.settings-left { flex: 1; min-width: 0; }
+.settings-label { font-size: 13px; color: var(--text); line-height: 1.3; }
+.settings-desc  { font-size: 11px; color: var(--text3); margin-top: 2px; }
+/* Toggle switch */
+.sw { position: relative; width: 36px; height: 20px; flex-shrink: 0; }
+.sw input { opacity: 0; width: 0; height: 0; position: absolute; }
+.sw-track {
+  position: absolute; inset: 0; border-radius: 10px;
+  background: var(--surface4); cursor: pointer; transition: background .2s;
+}
+.sw input:checked + .sw-track { background: var(--accent); }
+.sw-track::after {
+  content:''; position: absolute; left: 3px; top: 3px;
+  width: 14px; height: 14px; border-radius: 50%; background: #fff;
+  transition: transform .2s; box-shadow: 0 1px 3px rgba(0,0,0,.3);
+}
+.sw input:checked + .sw-track::after { transform: translateX(16px); }
+/* Select + input */
+.settings-select {
+  background: var(--surface3); border: 1px solid var(--border2);
+  color: var(--text); border-radius: var(--rsm); font-size: 12px;
+  padding: 5px 8px; font-family: var(--font-sans); cursor: pointer;
+}
+.settings-select:focus { outline: 1px solid var(--accent); }
+.settings-text-input {
+  background: var(--surface3); border: 1px solid var(--border2);
+  color: var(--text); border-radius: var(--rsm); font-size: 12px;
+  padding: 5px 10px; font-family: var(--font-mono); width: 100%;
+}
+.settings-text-input:focus { outline: 1px solid var(--accent); }
+/* Chip pills */
+.chip-group { display: flex; gap: 5px; flex-wrap: wrap; }
+.chip {
+  padding: 3px 11px; border-radius: 20px; font-size: 11.5px; cursor: pointer;
+  border: 1px solid var(--border2); background: var(--surface3);
+  color: var(--text2); transition: var(--tr); font-family: var(--font-sans);
+}
+.chip.on { background: var(--accentbg); border-color: var(--accent); color: var(--accent3); font-weight: 500; }
+.settings-version { font-size: 11px; color: var(--text3); font-family: var(--font-mono); text-align: center; padding-top: 4px; }
 
 /* ── CONTENT ──────────────────────────────────────── */
 .content { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
@@ -671,34 +737,43 @@ body {
 
 <div class="main">
   <div class="sidebar">
-    <div class="sb-section">
-      <div class="sb-label">Places</div>
-      <div class="sb-item active" onclick="nav('/')" data-path="/"><span class="sb-icon">⌂</span>Root</div>
-      <div class="sb-item" onclick="nav('/home')" data-path="/home"><span class="sb-icon">⌂</span>Home</div>
-      <div class="sb-item" onclick="nav('/etc')" data-path="/etc"><span class="sb-icon">⚙</span>Config</div>
-      <div class="sb-item" onclick="nav('/var')" data-path="/var"><span class="sb-icon">📊</span>Var</div>
-      <div class="sb-item" onclick="nav('/tmp')" data-path="/tmp"><span class="sb-icon">⚡</span>Temp</div>
-      <div class="sb-item" onclick="nav('/mnt')" data-path="/mnt"><span class="sb-icon">💾</span>Mounts</div>
-      <div class="sb-item" onclick="nav('/media')" data-path="/media"><span class="sb-icon">📀</span>Media</div>
-    </div>
-    <div class="sb-divider"></div>
-    <div class="sb-section" id="pinned-section" style="display:none">
-      <div class="sb-label" style="display:flex;justify-content:space-between;align-items:center">
-        <span>Pinned</span>
+    <div class="sb-scroll">
+      <div class="sb-section">
+        <div class="sb-label">Places</div>
+        <div class="sb-item active" onclick="nav('/')" data-path="/"><span class="sb-icon">⌂</span>Root</div>
+        <div class="sb-item" onclick="nav('/home')" data-path="/home"><span class="sb-icon">⌂</span>Home</div>
+        <div class="sb-item" onclick="nav('/etc')" data-path="/etc"><span class="sb-icon">⚙</span>Config</div>
+        <div class="sb-item" onclick="nav('/var')" data-path="/var"><span class="sb-icon">📊</span>Var</div>
+        <div class="sb-item" onclick="nav('/tmp')" data-path="/tmp"><span class="sb-icon">⚡</span>Temp</div>
+        <div class="sb-item" onclick="nav('/mnt')" data-path="/mnt"><span class="sb-icon">💾</span>Mounts</div>
+        <div class="sb-item" onclick="nav('/media')" data-path="/media"><span class="sb-icon">📀</span>Media</div>
       </div>
-      <div id="pinned-list"></div>
+      <div class="sb-divider"></div>
+      <div class="sb-section" id="pinned-section" style="display:none">
+        <div class="sb-label" style="display:flex;justify-content:space-between;align-items:center">
+          <span>Pinned</span>
+        </div>
+        <div id="pinned-list"></div>
+      </div>
+      <div class="sb-divider" id="pinned-divider" style="display:none"></div>
+      <div class="sb-section">
+        <div class="sb-label">System</div>
+        <div class="sb-item" onclick="showTrash()"><span class="sb-icon">🗑</span>Trash<span class="sb-badge" id="trash-badge" style="display:none">0</span></div>
+        <div class="sb-item" onclick="showJobs()"><span class="sb-icon">⚙</span>Jobs<span class="sb-badge" id="jobs-badge" style="display:none">0</span></div>
+      </div>
+      <div class="sb-divider"></div>
+      <div class="sb-section">
+        <div class="disk-card">
+          <div class="disk-head"><span>Storage</span><span id="disk-pct">—</span></div>
+          <div class="disk-track"><div class="disk-fill" id="disk-fill" style="width:0%"></div></div>
+          <div class="disk-nums" id="disk-nums">—</div>
+        </div>
+      </div>
     </div>
-    <div class="sb-divider" id="pinned-divider" style="display:none"></div>
-    <div class="sb-section">
-      <div class="sb-label">System</div>
-      <div class="sb-item" onclick="showTrash()"><span class="sb-icon">🗑</span>Trash<span class="sb-badge" id="trash-badge" style="display:none">0</span></div>
-      <div class="sb-item" onclick="showJobs()"><span class="sb-icon">⚙</span>Jobs<span class="sb-badge" id="jobs-badge" style="display:none">0</span></div>
-    </div>
-    <div style="flex:1"></div>
-    <div class="disk-card">
-      <div class="disk-head"><span>Storage</span><span id="disk-pct">—</span></div>
-      <div class="disk-track"><div class="disk-fill" id="disk-fill" style="width:0%"></div></div>
-      <div class="disk-nums" id="disk-nums">—</div>
+    <div class="sb-footer">
+      <div class="sb-item" onclick="showSettings()" style="margin:0">
+        <span class="sb-icon">⚙</span>Settings
+      </div>
     </div>
   </div>
 
@@ -932,20 +1007,36 @@ function fileIcon(e) {
   return ICONS.file;
 }
 function fmtSize(b) {
+  if (b == null || b === '') return '—';
+  const unit = getSetting('sizeUnit');
+  if (unit === 'bytes') return b.toLocaleString() + ' B';
+  if (unit === 'kb')    return (b/1024).toFixed(1) + ' KB';
   if (!b) return '—';
-  if (b < 1024) return b+'B';
-  if (b < 1024**2) return (b/1024).toFixed(1)+'K';
-  if (b < 1024**3) return (b/1024**2).toFixed(1)+'M';
-  return (b/1024**3).toFixed(2)+'G';
+  if (b < 1024) return b + 'B';
+  if (b < 1024**2) return (b/1024).toFixed(1) + 'K';
+  if (b < 1024**3) return (b/1024**2).toFixed(1) + 'M';
+  return (b/1024**3).toFixed(2) + 'G';
 }
 function fmtDate(d) {
   if (!d) return '—';
-  const dt = new Date(d);
-  return dt.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' '+dt.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
+  const dt  = new Date(d);
+  const fmt = getSetting('dateFormat');
+  if (fmt === 'full') return dt.toISOString().slice(0,16).replace('T',' ');
+  if (fmt === 'relative') {
+    const diff = Date.now() - dt.getTime();
+    if (diff < 60000)   return 'just now';
+    if (diff < 3600000) return Math.floor(diff/60000) + 'm ago';
+    if (diff < 86400000)return Math.floor(diff/3600000) + 'h ago';
+    if (diff < 2592000000) return Math.floor(diff/86400000) + 'd ago';
+  }
+  return dt.toLocaleDateString(undefined,{month:'short',day:'numeric'}) + ' ' +
+         dt.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
 }
 function filterFiles() {
   const q = document.getElementById('search').value.toLowerCase();
-  filtered = q ? entries.filter(e => e.name.toLowerCase().includes(q)) : [...entries];
+  const showHidden = getSetting('showHidden');
+  let base = entries.filter(e => showHidden || !e.name.startsWith('.'));
+  filtered = q ? base.filter(e => e.name.toLowerCase().includes(q)) : base;
   renderFiles();
 }
 function renderFiles() {
@@ -961,8 +1052,12 @@ function renderFiles() {
     area.innerHTML = `<div class="list-head"><span></span><span></span><span>Name</span><span>Size</span><span>Modified</span><span>Perms</span></div><div class="file-list">${filtered.map(e=>listItem(e,cuts)).join('')}</div>`;
   }
   area.querySelectorAll('[data-path]').forEach(el => {
-    el.addEventListener('click', ev => clickItem(ev, el.dataset.path, el.dataset.type));
-    el.addEventListener('dblclick', () => dblItem(el.dataset.path, el.dataset.type));
+    el.addEventListener('click', ev => {
+      clickItem(ev, el.dataset.path, el.dataset.type);
+      if (getSetting('singleClickOpen') && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey)
+        dblItem(el.dataset.path, el.dataset.type);
+    });
+    el.addEventListener('dblclick', () => { if (!getSetting('singleClickOpen')) dblItem(el.dataset.path, el.dataset.type); });
     el.addEventListener('contextmenu', ev => ctxMenu(ev, el.dataset.path, el.dataset.type));
   });
 }
@@ -1441,6 +1536,7 @@ async function showJobs() {
     </div>
     <div class="modal-row">
       <button class="mbtn" onclick="closeModal();setTimeout(showJobs,10)" style="margin-right:auto">&#8635; Refresh</button>
+      ${getSetting('dozzleUrl') ? `<a class="mbtn" href="${esc(getSetting('dozzleUrl'))}" target="_blank" rel="noopener" style="text-decoration:none">📋 Dozzle Logs ↗</a>` : ''}
       <button class="mbtn" onclick="closeModal()">Close</button>
     </div>`;
 }
@@ -1787,8 +1883,7 @@ async function openEditor(p) {
     const ta = document.getElementById('ed-area');
     ta.value = d.content;
 
-    const lines = d.content.split('
-').length;
+    const lines = d.content.split('\n').length;
     const info  = document.getElementById('ed-info');
     if (info) info.textContent = `${lines.toLocaleString()} lines · ${fmtSize(d.size)}`;
 
@@ -1811,8 +1906,7 @@ async function openEditor(p) {
         if (saveBtn) saveBtn.disabled = !editorState.dirty;
       }
       // Update line count
-      const l = ta.value.split('
-').length;
+      const l = ta.value.split('\n').length;
       if (info) info.textContent = `${l.toLocaleString()} lines · ${fmtSize(new Blob([ta.value]).size)}`;
     });
 
@@ -2196,6 +2290,191 @@ function showAITask(initialDir) {
     }
   });
 }
+
+// ─────────────────────────────────────────────────────────────────
+// SETTINGS
+// ─────────────────────────────────────────────────────────────────
+const SETTINGS_DEFAULTS = {
+  confirmDelete:    true,
+  showHidden:       false,
+  singleClickOpen:  false,
+  dateFormat:       'relative',
+  sizeUnit:         'auto',
+  editorTabSize:    '2',
+  editorWrap:       false,
+  gotifyEnabled:    false,
+  gotifyUrl:        '',
+  gotifyToken:      '',
+  dozzleUrl:        '',
+};
+
+function loadSettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('nova_settings') || '{}');
+    return { ...SETTINGS_DEFAULTS, ...saved };
+  } catch { return { ...SETTINGS_DEFAULTS }; }
+}
+function saveSettings(settings) {
+  try { localStorage.setItem('nova_settings', JSON.stringify(settings)); } catch {}
+}
+
+let _settings = loadSettings();
+
+function showSettings() {
+  const s = { ..._settings };
+  const m = mkModal();
+  m.style.maxWidth = '480px';
+
+  function render() {
+    m.innerHTML = `
+<h2 style="margin-bottom:18px">⚙ Settings</h2>
+
+<div class="settings-group">
+  <div class="settings-group-title">Files &amp; Navigation</div>
+
+  <div class="settings-row">
+    <div class="settings-left">
+      <div class="settings-label">Show hidden files</div>
+      <div class="settings-desc">Files and folders starting with a dot</div>
+    </div>
+    <label class="sw"><input type="checkbox" id="s-hidden" ${s.showHidden?'checked':''}><span class="sw-track"></span></label>
+  </div>
+
+  <div class="settings-row">
+    <div class="settings-left">
+      <div class="settings-label">Confirm before deleting</div>
+      <div class="settings-desc">Ask before permanently deleting files</div>
+    </div>
+    <label class="sw"><input type="checkbox" id="s-confirm-del" ${s.confirmDelete?'checked':''}><span class="sw-track"></span></label>
+  </div>
+
+  <div class="settings-row">
+    <div class="settings-left">
+      <div class="settings-label">Single-click opens files</div>
+      <div class="settings-desc">Open on single click instead of double-click</div>
+    </div>
+    <label class="sw"><input type="checkbox" id="s-singleclick" ${s.singleClickOpen?'checked':''}><span class="sw-track"></span></label>
+  </div>
+
+  <div class="settings-row">
+    <div class="settings-left"><div class="settings-label">Date format</div></div>
+    <select class="settings-select" id="s-date">
+      <option value="relative" ${s.dateFormat==='relative'?'selected':''}>Relative (2 hours ago)</option>
+      <option value="short"    ${s.dateFormat==='short'?'selected':''}>Short (Jan 5, 2024)</option>
+      <option value="full"     ${s.dateFormat==='full'?'selected':''}>Full (2024-01-05 14:32)</option>
+    </select>
+  </div>
+
+  <div class="settings-row">
+    <div class="settings-left"><div class="settings-label">File size display</div></div>
+    <select class="settings-select" id="s-size">
+      <option value="auto" ${s.sizeUnit==='auto'?'selected':''}>Auto (KB/MB/GB)</option>
+      <option value="bytes" ${s.sizeUnit==='bytes'?'selected':''}>Bytes</option>
+      <option value="kb"   ${s.sizeUnit==='kb'?'selected':''}>Always KB</option>
+    </select>
+  </div>
+</div>
+
+<div class="settings-group">
+  <div class="settings-group-title">Editor</div>
+
+  <div class="settings-row">
+    <div class="settings-left"><div class="settings-label">Tab size</div></div>
+    <div class="chip-group">
+      ${['2','4','8'].map(n=>`<div class="chip${s.editorTabSize===n?' on':''}" onclick="this.closest('.chip-group').querySelectorAll('.chip').forEach(c=>c.classList.remove('on'));this.classList.add('on');document.getElementById('s-tabsize').value='${n}'">${n} spaces</div>`).join('')}
+      <input type="hidden" id="s-tabsize" value="${s.editorTabSize}">
+    </div>
+  </div>
+
+  <div class="settings-row">
+    <div class="settings-left">
+      <div class="settings-label">Word wrap</div>
+      <div class="settings-desc">Wrap long lines in the text editor</div>
+    </div>
+    <label class="sw"><input type="checkbox" id="s-wrap" ${s.editorWrap?'checked':''}><span class="sw-track"></span></label>
+  </div>
+</div>
+
+<div class="settings-group">
+  <div class="settings-group-title">Integrations</div>
+
+  <div class="settings-row">
+    <div class="settings-left">
+      <div class="settings-label">Gotify notifications</div>
+      <div class="settings-desc">Push alerts for completed jobs</div>
+    </div>
+    <label class="sw"><input type="checkbox" id="s-gotify" ${s.gotifyEnabled?'checked':''}><span class="sw-track"></span></label>
+  </div>
+
+  <div style="padding:6px 0 4px;display:${s.gotifyEnabled?'block':'none'}" id="s-gotify-fields">
+    <input class="settings-text-input" id="s-gotify-url" placeholder="http://gotify.host/message" value="${esc(s.gotifyUrl)}" style="margin-bottom:6px">
+    <input class="settings-text-input" id="s-gotify-token" placeholder="Application token" value="${esc(s.gotifyToken)}">
+  </div>
+
+  <div class="settings-row">
+    <div class="settings-left">
+      <div class="settings-label">Dozzle log viewer URL</div>
+      <div class="settings-desc">Link to your Dozzle instance for container logs</div>
+    </div>
+  </div>
+  <input class="settings-text-input" id="s-dozzle-url" placeholder="http://dozzle.host" value="${esc(s.dozzleUrl)}" style="margin-bottom:12px">
+</div>
+
+<div class="modal-row" style="margin-top:4px">
+  <button class="mbtn" onclick="closeModal()">Cancel</button>
+  <button class="mbtn" onclick="resetSettings()" style="color:var(--red)">Reset</button>
+  <button class="mbtn ok" onclick="applySettings()">Save</button>
+</div>
+<div class="settings-version">Nova · v16</div>`;
+
+    // Wire gotify toggle live
+    const gotifyChk = m.querySelector('#s-gotify');
+    if (gotifyChk) {
+      gotifyChk.addEventListener('change', () => {
+        const fields = m.querySelector('#s-gotify-fields');
+        if (fields) fields.style.display = gotifyChk.checked ? 'block' : 'none';
+      });
+    }
+  }
+
+  window.applySettings = function() {
+    const get  = id => document.getElementById(id);
+    const chk  = id => (get(id)||{}).checked;
+    const val  = id => (get(id)||{}).value || '';
+    _settings = {
+      showHidden:      chk('s-hidden'),
+      confirmDelete:   chk('s-confirm-del'),
+      singleClickOpen: chk('s-singleclick'),
+      dateFormat:      val('s-date') || 'relative',
+      sizeUnit:        val('s-size') || 'auto',
+      editorTabSize:   val('s-tabsize') || '2',
+      editorWrap:      chk('s-wrap'),
+      gotifyEnabled:   chk('s-gotify'),
+      gotifyUrl:       val('s-gotify-url'),
+      gotifyToken:     val('s-gotify-token'),
+      dozzleUrl:       val('s-dozzle-url'),
+    };
+    saveSettings(_settings);
+    closeModal();
+    reload();
+    toast('✓ Settings saved');
+  };
+
+  window.resetSettings = function() {
+    if (!confirm('Reset all settings to defaults?')) return;
+    _settings = { ...SETTINGS_DEFAULTS };
+    saveSettings(_settings);
+    s.__proto__ = null;
+    Object.assign(s, _settings);
+    render();
+    toast('Settings reset');
+  };
+
+  render();
+}
+
+// Expose settings to rest of app
+function getSetting(key) { return _settings[key] ?? SETTINGS_DEFAULTS[key]; }
 
 function showAIModels() {
   const m = mkModal();

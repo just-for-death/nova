@@ -14,22 +14,53 @@ const server = http.createServer(app);
 const wss    = new WebSocket.Server({ server });
 
 // ─────────────────────────────────────────────────────────────────
-// STRUCTURED LOGGER
+// STRUCTURED LOGGER  (Dozzle-friendly JSON + human fallback)
 // ─────────────────────────────────────────────────────────────────
-const LOG_LEVEL = (process.env.LOG_LEVEL || 'info').toLowerCase();
-const LEVELS    = { debug: 0, info: 1, warn: 2, error: 3 };
-const lvlNum    = () => LEVELS[LOG_LEVEL] ?? 1;
+const LOG_LEVEL  = (process.env.LOG_LEVEL  || 'info').toLowerCase();
+const LOG_FORMAT = (process.env.LOG_FORMAT || 'json').toLowerCase(); // 'json' | 'text'
+const LEVELS     = { debug: 0, info: 1, warn: 2, error: 3 };
+const lvlNum     = () => LEVELS[LOG_LEVEL] ?? 1;
+
+// Emoji status icons for human-readable text mode
+const LEVEL_ICON = { debug: '🔍', info: '●', warn: '⚠', error: '✖' };
 
 function log(level, msg, meta = {}) {
   if ((LEVELS[level] ?? 1) < lvlNum()) return;
-  const ts   = new Date().toISOString();
-  const tag  = level.toUpperCase().padEnd(5);
-  const metaStr = Object.keys(meta).length ? ' ' + JSON.stringify(meta) : '';
-  const line = `[${ts}] [${tag}] ${msg}${metaStr}`;
-  if (level === 'error') console.error(line);
-  else if (level === 'warn')  console.warn(line);
-  else console.log(line);
+  const ts = new Date().toISOString();
+
+  if (LOG_FORMAT === 'json') {
+    // Structured JSON — Dozzle parses this automatically when log_format=json
+    const entry = {
+      time:    ts,
+      level,
+      msg,
+      service: 'nova',
+      pid:     process.pid,
+      ...meta
+    };
+    // Dozzle surfaces 'level', 'msg', and top-level fields — keep them flat
+    const line = JSON.stringify(entry);
+    if (level === 'error') process.stderr.write(line + '\n');
+    else                   process.stdout.write(line + '\n');
+  } else {
+    // Human-readable text fallback
+    const icon    = LEVEL_ICON[level] || '·';
+    const tag     = level.toUpperCase().padEnd(5);
+    const metaStr = Object.keys(meta).length
+      ? '  ' + Object.entries(meta).map(([k,v]) => `${k}=${JSON.stringify(v)}`).join(' ')
+      : '';
+    const line = `${ts} ${icon} [${tag}] ${msg}${metaStr}`;
+    if (level === 'error') console.error(line);
+    else if (level === 'warn')  console.warn(line);
+    else console.log(line);
+  }
 }
+
+// Convenience shortcuts
+const logInfo  = (msg, meta) => log('info',  msg, meta);
+const logWarn  = (msg, meta) => log('warn',  msg, meta);
+const logError = (msg, meta) => log('error', msg, meta);
+const logDebug = (msg, meta) => log('debug', msg, meta);
 
 // ─────────────────────────────────────────────────────────────────
 // PROCESS HEALTH — catch anything that would silently crash/hang
@@ -2193,5 +2224,14 @@ app.post('/api/ollama/search', async (req, res) => {
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 server.listen(PORT, () => {
-  log('info', 'Nova File Manager started', { port: PORT, root: ROOT || '/', pid: process.pid, node: process.version });
+  log('info', 'Nova File Manager started', {
+    port:        PORT,
+    root:        ROOT || '/',
+    pid:         process.pid,
+    node:        process.version,
+    log_level:   LOG_LEVEL,
+    log_format:  LOG_FORMAT,
+    ollama_url:  process.env.OLLAMA_URL || 'http://localhost:11434',
+    gotify:      !!process.env.GOTIFY_URL,
+  });
 });
