@@ -168,6 +168,10 @@ app.use(express.static(path.join(__dirname, 'public')));
 function resolvePath(p) {
   const normalized = path.normalize('/' + (p || '/')).replace(/\/\/+/g, '/');
   const result = ROOT + normalized;
+  // Path traversal guard: resolved path must still start with ROOT
+  if (ROOT && !result.startsWith(ROOT)) {
+    throw new Error(`Path traversal rejected: ${p}`);
+  }
   return result.length > ROOT.length + 1 && result.endsWith('/')
     ? result.replace(/\/$/, '') : result;
 }
@@ -434,6 +438,99 @@ app.get('/api/diskinfo', (req, res) => {
   });
 });
 
+
+
+// ── Mounted drives — STRICT allowlist: only real block/network devices ──
+// Strategy:
+//   1. Allowlist: device must start with /dev/ OR be a network filesystem
+//   2. Skip filesystem types that are never real storage
+//   3. Skip mountpoints that look like Docker bind-mounted single files
+//   4. Skip mountpoints with container hash names (64-char hex)
+//   5. Deduplicate: run df and group by the REAL underlying device df reports —
+//      if /home, /srv, /tmp all sit on the same /dev/sda1 they become one entry
+//      and we pick the most descriptive mountpoint (prefer /mnt, /media, shortest)
+app.get('/api/mounts', (req, res) => {
+  const NETWORK_FS = new Set(['nfs','nfs4','cifs','smbfs','davfs','fuse.sshfs',
+    'fuse.rclone','fuse.encfs','fuse.s3fs','glusterfs','cephfs','lustre','beegfs']);
+  const SKIP_FS    = new Set(['proc','sysfs','devtmpfs','devpts','tmpfs','cgroup',
+    'cgroup2','pstore','securityfs','debugfs','tracefs','configfs','fusectl',
+    'hugetlbfs','mqueue','bpf','rpc_pipefs','nfsd','autofs','efivarfs',
+    'overlay','squashfs','ramfs','9p','virtiofs','fuse.lxcfs','nsfs',
+    'binfmt_misc','mqueue','sunrpc']);
+  // Mountpoints that look like Docker bind-mounted single files (contain a dot but no slash after)
+  const FILE_MOUNT  = /\/[^/]+\.[^/]+$/;
+  // Container hash-style names (12 or 64 hex chars as a path component)
+  const HASH_MOUNT  = /\/[0-9a-f]{12,64}(\/|$)/;
+  const SKIP_MPS    = new Set(['/','/boot/efi','/boot/esp']);
+  const SKIP_PFXS   = ['/proc','/sys','/dev','/run/user','/run/credentials','/snap','/var/lib/docker'];
+
+  fs.readFile('/proc/mounts', 'utf8', (err, data) => {
+    if (err) return res.json({ mounts: [] });
+
+    const raw = [];
+    for (const line of data.trim().split('\n')) {
+      const parts = line.split(' ');
+      const device = parts[0], mountpoint = parts[1], fstype = parts[2];
+      if (!device || !mountpoint || !fstype) continue;
+      if (SKIP_FS.has(fstype)) continue;
+      if (SKIP_MPS.has(mountpoint)) continue;
+      if (SKIP_PFXS.some(p => mountpoint.startsWith(p))) continue;
+      if (FILE_MOUNT.test(mountpoint)) continue;  // e.g. /etc/resolv.conf
+      if (HASH_MOUNT.test(mountpoint)) continue;  // container hashes
+      // ALLOWLIST: real block device or known network fs
+      const isBlock   = device.startsWith('/dev/');
+      const isNetwork = NETWORK_FS.has(fstype);
+      if (!isBlock && !isNetwork) continue;
+      raw.push({ device, mountpoint, fstype });
+    }
+
+    if (!raw.length) return res.json({ mounts: [] });
+
+    // Use df to get real device names + usage — portable awk (works on Alpine/BusyBox too)
+    // Build args safely: each mountpoint single-quoted, internal quotes escaped
+    const safeArgs = raw.map(m => `'${m.mountpoint.replace(/'/g, "'\"'\"'")}'`).join(' ');
+    exec(`df -B1 ${safeArgs} 2>/dev/null | awk 'NR>1{dev=$1; sz=$2; used=$3; av=$4; mp=""; for(i=6;i<=NF;i++) mp=mp (i>6?" ":"") $i; print dev,sz,used,av,mp}'`, (err2, stdout) => {
+      // Build map: real-device → best entry (dedup drives mounted at multiple paths)
+      const byDevice = new Map();
+      if (!err2 && stdout) {
+        for (const line of stdout.trim().split('\n')) {
+          if (!line.trim()) continue;
+          const cols = line.trim().split(/\s+/);
+          if (cols.length < 5) continue;
+          const [dfDev, total, used, avail, ...mpParts] = cols;
+          const mp   = mpParts.join(' ');
+          const size = +total;
+          if (!size || size < 1) continue;           // skip 0-byte virtual mounts
+          const meta = raw.find(r => r.mountpoint === mp) || {};
+          const entry = { device: dfDev, mountpoint: mp, fstype: meta.fstype || '',
+                          total: size, used: +used, avail: +avail };
+          // Dedup: if same underlying device seen before, prefer /mnt or /media paths,
+          // else prefer the one with the shortest / most descriptive mountpoint
+          if (!byDevice.has(dfDev)) {
+            byDevice.set(dfDev, entry);
+          } else {
+            const prev = byDevice.get(dfDev);
+            const score = mp => (mp.startsWith('/mnt')||mp.startsWith('/media')) ? 0 : mp.length;
+            if (score(mp) < score(prev.mountpoint)) byDevice.set(dfDev, entry);
+          }
+        }
+      }
+
+      const mounts = [...byDevice.values()]
+        .filter(m => m.total > 0)
+        .map(m => ({
+          ...m,
+          // Strip ROOT prefix so client nav() calls work correctly (resolvePath re-adds ROOT)
+          mountpoint: toVirtual(m.mountpoint),
+          label: m.mountpoint.split('/').filter(Boolean).pop()
+                 || path.basename(m.device) || m.device
+        }))
+        .sort((a,b) => b.total - a.total);   // largest drive first
+
+      res.json({ mounts });
+    });
+  });
+});
 app.get('/api/stat', (req, res) => {
   const p = resolvePath(req.query.path);
   try {
@@ -1205,6 +1302,7 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
           const errMsg = `Failed to copy "${fname}": ${e.message}`;
           log('error', `[${jid}] Copy failed`, { file: fname, code: e.code, error: e.message, start_byte: startByte });
           job.log.push(errMsg);
+          job.errorCount = (job.errorCount || 0) + 1;
           ledgerSetState(ledger, f.destPath, 'error');
           notifyGotify(`Transfer error ✗`, `${errMsg}\nJob: ${jid}\nClick Resume to continue.`, 9);
           fatalErr = { errMsg, finishedAt: new Date().toISOString() };
@@ -1298,13 +1396,18 @@ app.post('/api/delete', (req, res) => {
   const { paths, clientId } = req.body;
   if (!paths?.length) return res.status(400).json({ error: 'No paths' });
 
+  // Guard: never allow deleting the virtual root '/' or ROOT itself
+  const safeToDelete = paths.filter(p => p && p !== '/' && resolvePath(p) !== ROOT);
+  if (safeToDelete.length === 0) return res.status(400).json({ error: 'Cannot delete root' });
+  const filteredPaths = safeToDelete;
+
   const metaFile = path.join(TRASH_DIR, '.meta.json');
 
   // For tiny deletes (≤5 items) do it synchronously so UI feels instant
-  if (paths.length <= 5) {
+  if (filteredPaths.length <= 5) {
     let meta = fs.existsSync(metaFile) ? JSON.parse(fs.readFileSync(metaFile)) : [];
     const errors = [];
-    for (const p of paths) {
+    for (const p of filteredPaths) {
       const abs      = resolvePath(p);
       const id       = uuidv4();
       const trashPath = path.join(TRASH_DIR, id);
@@ -1318,9 +1421,9 @@ app.post('/api/delete', (req, res) => {
   }
 
   // Large batch delete — run as background job
-  const job = createJob('delete', clientId, { sources: paths, phase: 'deleting' });
+  const job = createJob('delete', clientId, { sources: filteredPaths, phase: 'deleting' });
   res.json({ jobId: job.jobId, started: true });
-  setImmediate(() => runDelete(job, paths, metaFile));
+  setImmediate(() => runDelete(job, filteredPaths, metaFile));
 });
 
 async function runDelete(job, paths, metaFile) {
@@ -1357,28 +1460,32 @@ app.post('/api/delete-permanent', (req, res) => {
   const { paths, clientId } = req.body;
   if (!paths?.length) return res.status(400).json({ error: 'No paths' });
 
-  if (paths.length <= 5) {
+  // Guard: never allow deleting the virtual root '/' or ROOT itself
+  const safePaths = paths.filter(p => p && p !== '/' && resolvePath(p) !== ROOT);
+  if (safePaths.length === 0) return res.status(400).json({ error: 'Cannot delete root' });
+
+  if (safePaths.length <= 5) {
     const errors = [];
-    for (const p of paths) {
+    for (const p of safePaths) {
       try { fs.rmSync(resolvePath(p), { recursive: true, force: true }); }
       catch (err) { errors.push({ path: p, error: err.message }); }
     }
     return errors.length ? res.status(207).json({ errors }) : res.json({ success: true });
   }
 
-  const job = createJob('delete-permanent', clientId, { sources: paths, phase: 'deleting' });
+  const job = createJob('delete-permanent', clientId, { sources: safePaths, phase: 'deleting' });
   res.json({ jobId: job.jobId, started: true });
   setImmediate(() => {
-    const total = paths.length;
+    const total = safePaths.length;
     let done = 0;
-    for (const p of paths) {
+    for (const p of safePaths) {
       try { fs.rmSync(resolvePath(p), { recursive: true, force: true }); }
       catch (e) { job.log.push(`Failed: ${p}: ${e.message}`); }
       done++;
       if (done % 10 === 0 || done === total)
         updateJob(job, { percent: Math.round((done / total) * 100), currentFile: path.basename(p) });
     }
-    updateJob(job, { status: 'done', percent: 100, phase: 'done', finishedAt: new Date().toISOString(), sources: paths });
+    updateJob(job, { status: 'done', percent: 100, phase: 'done', finishedAt: new Date().toISOString(), sources: safePaths });
   });
 });
 
@@ -1529,17 +1636,25 @@ async function runZip(job, sources, destAbs) {
   const jid = job.jobId.slice(0, 8);
   log('info', `[${jid}] Zip started`, { sources: sources.length, dest: destAbs });
 
-  // Count total size for progress
+  // Count total size recursively for accurate progress bars
+  async function sumDirSizeRecursive(dir) {
+    let tot = 0;
+    let ents;
+    try { ents = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return 0; }
+    for (const e of ents) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) { tot += await sumDirSizeRecursive(full); }
+      else if (e.isFile()) { try { const s = await fs.promises.stat(full); tot += s.size; } catch {} }
+    }
+    return tot;
+  }
+
   let totalBytes = 0;
   for (const src of sources) {
     try {
       const s = fs.statSync(resolvePath(src));
-      if (s.isDirectory()) {
-        const entries = fs.readdirSync(resolvePath(src));
-        for (const e of entries) {
-          try { const es = fs.statSync(path.join(resolvePath(src), e)); totalBytes += es.size; } catch {}
-        }
-      } else { totalBytes += s.size; }
+      if (s.isDirectory()) { totalBytes += await sumDirSizeRecursive(resolvePath(src)); }
+      else { totalBytes += s.size; }
     } catch {}
   }
   totalBytes = Math.max(totalBytes, 1);
@@ -1667,22 +1782,11 @@ async function runUnzip(job, zipPath, destDir) {
   try {
     await new Promise((resolve, reject) => {
       const child = execFile('unzip', ['-o', zipPath, '-d', destDir], { timeout: 300_000 }, (err) => {
-        if (job.cancelRequested) return; // handled by kill handler
-        if (err && err.killed) { return; } // killed by cancel
+        if (job.cancelRequested) return;
+        if (err && err.killed) { return; }
         if (err && err.code !== 0 && err.code !== 1) {
           // code 1 = "at least one warning" — still success
-          // Try Node fallback
-          (async () => {
-            try {
-              const StreamZip = require('node-stream-zip');
-              const zip = new StreamZip.async({ file: zipPath });
-              await zip.extract(null, destDir);
-              await zip.close();
-              resolve();
-            } catch (e2) {
-              reject(new Error('Unzip failed: ' + (err.message || e2.message)));
-            }
-          })();
+          reject(new Error('Unzip failed (exit ' + err.code + '): ' + (err.message || 'unknown error')));
           return;
         }
         resolve();
@@ -1702,8 +1806,10 @@ async function runUnzip(job, zipPath, destDir) {
             const m = line.match(/inflating:\s+(.+)/);
             if (m) {
               fileCount++;
+              // fileCount is NOT a percentage — cap at 95 so 100% only shows on true done
+              const pct = Math.min(95, fileCount);
               updateJob(job, { currentFile: path.basename(m[1].trim()), phase: 'extracting',
-                               percent: Math.min(99, fileCount) });
+                               percent: pct });
             }
           }
         });
@@ -1866,6 +1972,33 @@ const MODEL_VISION = process.env.OLLAMA_VISION_MODEL || 'moondream:latest';
 const MODEL_EMBED  = process.env.OLLAMA_EMBED_MODEL  || 'nomic-embed-text:latest';
 const MODEL_AGENT  = process.env.OLLAMA_AGENT_MODEL  || MODEL_TEXT;
 
+
+// ── Ollama rate limiter ─────────────────────────────────────────
+// Prevents misbehaving clients from hammering AI endpoints.
+// Configurable via OLLAMA_RATE_LIMIT (reqs) and OLLAMA_RATE_WINDOW (ms).
+const OLLAMA_RATE_MAX    = parseInt(process.env.OLLAMA_RATE_LIMIT  || '30');
+const OLLAMA_RATE_WINDOW = parseInt(process.env.OLLAMA_RATE_WINDOW || '60000');
+const _ollamaHits = new Map(); // ip → { count, resetAt }
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, rec] of _ollamaHits) { if (now > rec.resetAt) _ollamaHits.delete(ip); }
+}, 120_000).unref();
+
+function ollamaRateLimit(req, res, next) {
+  const ip  = req.ip || req.socket?.remoteAddress || 'unknown';
+  const now = Date.now();
+  let rec   = _ollamaHits.get(ip);
+  if (!rec || now > rec.resetAt) { rec = { count: 0, resetAt: now + OLLAMA_RATE_WINDOW }; _ollamaHits.set(ip, rec); }
+  rec.count++;
+  if (rec.count > OLLAMA_RATE_MAX) {
+    const retry = Math.ceil((rec.resetAt - now) / 1000);
+    log('warn', '[ollama] rate limit', { ip, count: rec.count, retry_s: retry });
+    return res.status(429).json({ error: `AI rate limit — retry in ${retry}s.` });
+  }
+  next();
+}
+app.use('/api/ollama', ollamaRateLimit);
+
 async function ollamaFetch(endpoint, body, timeoutMs = 60_000) {
   const ctrl   = new AbortController();
   const timer  = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -2001,16 +2134,35 @@ async function extractFileContent(abs) {
     } catch (e) { return { kind: 'error', text: '', ext: 'pdf', name, error: e.message }; }
   }
 
-  // For directories — return a listing summary
-  if (ext === '' || !ext) {
-    try {
-      const s = fs.statSync(abs);
-      if (s.isDirectory()) {
-        const entries = fs.readdirSync(abs).slice(0, 60);
-        return { kind: 'text', text: `Directory listing:\n${entries.join('\n')}`, ext: 'dir', name };
+  // For directories — stat first so dotted dir names work too (e.g. /var/lib/node.js)
+  try {
+    const _st = fs.statSync(abs);
+    if (_st.isDirectory()) {
+      const allEntries = fs.readdirSync(abs);
+      const stats = { dirs: [], images: [], code: [], text: [], other: [] };
+      for (const e of allEntries.slice(0, 120)) {
+        try {
+          const st = fs.statSync(path.join(abs, e));
+          if (st.isDirectory()) { stats.dirs.push(e); continue; }
+        } catch {}
+        const x = path.extname(e).toLowerCase().slice(1);
+        if (['jpg','jpeg','png','gif','webp','svg','avif','heic'].includes(x)) stats.images.push(e);
+        else if (['js','ts','py','go','rs','java','sh','c','cpp','rb','php'].includes(x)) stats.code.push(e);
+        else if (['txt','md','log','json','yaml','yml','toml','xml','csv'].includes(x)) stats.text.push(e);
+        else stats.other.push(e);
       }
-    } catch {}
-  }
+      const total = allEntries.length;
+      const lines = [
+        `Folder: ${name} (${total} items total)`,
+        stats.dirs.length   ? `Subfolders (${stats.dirs.length}): ${stats.dirs.slice(0,10).join(', ')}${stats.dirs.length>10?' …':''}` : '',
+        stats.images.length ? `Images (${stats.images.length}): ${stats.images.slice(0,8).join(', ')}` : '',
+        stats.code.length   ? `Code files (${stats.code.length}): ${stats.code.slice(0,8).join(', ')}` : '',
+        stats.text.length   ? `Documents/text (${stats.text.length}): ${stats.text.slice(0,8).join(', ')}` : '',
+        stats.other.length  ? `Other files (${stats.other.length}): ${stats.other.slice(0,8).join(', ')}` : '',
+      ].filter(Boolean).join('\n');
+      return { kind: 'text', text: lines, ext: 'dir', name };
+    }
+  } catch {}
 
   // Unknown binary — return minimal metadata
   try {
@@ -2040,7 +2192,9 @@ app.post('/api/ollama/summarize', async (req, res) => {
   try {
     const d = await ollamaFetch('/api/generate', {
       model,
-      prompt: `Summarize this file in 2-4 sentences. Be factual and concise.\nFile: ${content.name}\n\n${content.text}`
+      prompt: content.ext === 'dir'
+        ? `You are a file manager assistant. Based on this folder inventory, write 2-3 sentences describing what this directory is for and what kinds of files it contains. Be specific and helpful.\n\n${content.text}`
+        : `Summarize this file in 2-4 sentences. Be factual and concise.\nFile: ${content.name}\n\n${content.text}`
     }, 90_000);
     const summary = (d.response || '').trim();
     notifyGotify('Nova AI ✦', `Summarized: ${content.name}\n${summary.slice(0, 200)}`, 3);
@@ -2076,30 +2230,40 @@ app.post('/api/ollama/agent-plan', async (req, res) => {
   }
 
   const sysPrompt = [
-    'You are a cautious file-manager AI inside the Nova file manager.',
-    'Your job is to turn the user request into safe file operations inside the current directory tree.',
+    'You are a file-manager AI inside the Nova file manager.',
+    'Turn the user request into safe file operations. You can move files anywhere in the filesystem.',
+    '',
     'Supported operations (ONLY these):',
-    '- mkdir: create a directory. Fields: { "op": "mkdir", "path": "<absolute nova path starting with />" }',
-    '- move: move/rename a file or folder. Fields: { "op": "move", "from": "<abs source>", "to": "<abs destination>" }',
-    '- move_filter: move a set of items in ONE directory. Fields: { "op": "move_filter", "dir": "<abs dir>", "target": "<abs target dir>", "filter": "non_image_files"|"image_files"|"directories"|"files" }',
-    '- move_except: move all items in a directory EXCEPT specific names. Fields: { "op": "move_except", "dir": "<abs dir>", "target": "<abs target dir>", "except": ["name1", "name2"] }',
+    '- mkdir:             create a directory.',
+    '  Fields: { "op": "mkdir", "path": "<absolute path>" }',
+    '- move:              move/rename a single file or folder.',
+    '  Fields: { "op": "move", "from": "<abs source>", "to": "<abs destination including filename>" }',
+    '- move_filter:       move items of a specific category from ONE directory to a target.',
+    '  Fields: { "op": "move_filter", "dir": "<abs dir>", "target": "<abs target dir>", "filter": "non_image_files"|"image_files"|"directories"|"files" }',
+    '- move_except_filter: move everything in a dir EXCEPT items of a category.',
+    '  Fields: { "op": "move_except_filter", "dir": "<abs dir>", "target": "<abs target dir>", "except_filter": "image_files"|"non_image_files"|"directories"|"files" }',
+    '- move_except:       move everything in a dir EXCEPT specific named files/folders.',
+    '  Fields: { "op": "move_except", "dir": "<abs dir>", "target": "<abs target dir>", "except": ["name1", "name2"] }',
     '',
     'Rules:',
-    '- Stay within the Nova root. Never use relative paths like "./" or "../".',
-    '- Prefer a single target folder instead of many small ones when the user says "into a single folder".',
-    '- Do NOT delete anything; do not emit delete, copy, or other operations.',
-    '- Use move_filter when the request describes moving a category of items (e.g. "all non-image files") to avoid listing hundreds of moves.',
-    '- Use move_except when the user wants to move "everything except" specific files or folders by name.',
-    '- move_filter and move_except move ONLY immediate children of "dir" (not recursive).',
-    '- It is OK if you output zero operations when the request is unsafe or impossible.',
+    '- Paths are absolute from the Nova root. Current dir is shown below.',
+    '- If the user names a destination folder that does not exist, emit a mkdir op for it FIRST.',
+    '- If user says "Downloads" resolve to /home/<user>/Downloads or the closest match visible in path.',
+    '  Current path components: ' + vDir.split('/').filter(Boolean).join(', '),
+    '- Use move_except_filter when user says "move everything except images" or "except jpegs/pngs/any image type".',
+    '- Use move_filter when user says "move only images" or "move only files".',
+    '- Use move_except when user says "except <specific filename>".',
+    '- move_filter / move_except / move_except_filter operate on immediate children of "dir" only (not recursive).',
+    '- Do NOT delete anything. Do not emit delete, copy, or chmod operations.',
+    '- If target is outside current dir, use the full absolute path (e.g. /home/user/Downloads/noob).',
+    '- Infer home directory from current path. E.g. if current is /home/zoro/Pictures/Wallpaper, home is /home/zoro.',
     '',
     `Current directory: ${toVirtual(abs)}`,
-    'Directory listing (truncated):',
+    'Files in current directory (up to 200):',
     listing || '(empty)',
     '',
-    'Return STRICT JSON only, with this shape:',
-    '{ "operations": [ { "op": "mkdir", "path": "..." }, { "op": "move", "from": "...", "to": "..." } ] }',
-    'No markdown, no comments, no extra text.'
+    'Return STRICT JSON only — no markdown, no comments, no extra text:',
+    '{ "operations": [ { "op": "mkdir", "path": "..." }, { "op": "move_except_filter", "dir": "...", "target": "...", "except_filter": "image_files" } ] }',
   ].join('\n');
 
   try {
@@ -2117,18 +2281,20 @@ app.post('/api/ollama/agent-plan', async (req, res) => {
     const ops = Array.isArray(plan.operations) ? plan.operations : [];
     const safeOps = ops
       .filter(op => op && typeof op === 'object' &&
-        (op.op === 'mkdir' || op.op === 'move' || op.op === 'move_filter' || op.op === 'move_except'))
+        (op.op === 'mkdir' || op.op === 'move' || op.op === 'move_filter' || op.op === 'move_except' || op.op === 'move_except_filter'))
       .map(op => {
-        if (op.op === 'mkdir') return { op: 'mkdir', path: String(op.path || '') };
-        if (op.op === 'move_filter') return { op: 'move_filter', dir: String(op.dir || ''), target: String(op.target || ''), filter: String(op.filter || '') };
-        if (op.op === 'move_except') return { op: 'move_except', dir: String(op.dir || ''), target: String(op.target || ''), except: Array.isArray(op.except) ? op.except.map(String) : [] };
+        if (op.op === 'mkdir')              return { op: 'mkdir', path: String(op.path || '') };
+        if (op.op === 'move_filter')        return { op: 'move_filter',        dir: String(op.dir || ''), target: String(op.target || ''), filter: String(op.filter || '') };
+        if (op.op === 'move_except_filter') return { op: 'move_except_filter', dir: String(op.dir || ''), target: String(op.target || ''), except_filter: String(op.except_filter || '') };
+        if (op.op === 'move_except')        return { op: 'move_except',        dir: String(op.dir || ''), target: String(op.target || ''), except: Array.isArray(op.except) ? op.except.map(String) : [] };
         return { op: 'move', from: String(op.from || ''), to: String(op.to || '') };
       })
       .filter(op => {
-        if (op.op === 'mkdir') return op.path.startsWith('/');
-        if (op.op === 'move') return op.from.startsWith('/') && op.to.startsWith('/');
-        if (op.op === 'move_filter') return op.dir.startsWith('/') && op.target.startsWith('/') && !!op.filter;
-        if (op.op === 'move_except') return op.dir.startsWith('/') && op.target.startsWith('/') && Array.isArray(op.except);
+        if (op.op === 'mkdir')              return op.path.startsWith('/');
+        if (op.op === 'move')               return op.from.startsWith('/') && op.to.startsWith('/');
+        if (op.op === 'move_filter')        return op.dir.startsWith('/') && op.target.startsWith('/') && !!op.filter;
+        if (op.op === 'move_except_filter') return op.dir.startsWith('/') && op.target.startsWith('/') && !!op.except_filter;
+        if (op.op === 'move_except')        return op.dir.startsWith('/') && op.target.startsWith('/') && Array.isArray(op.except);
         return false;
       });
     res.json({ plan: { operations: safeOps }, raw });
@@ -2138,6 +2304,89 @@ app.post('/api/ollama/agent-plan', async (req, res) => {
   }
 });
 
+// Agent: dry-run preview — returns exactly which files would be affected, no changes made
+app.post('/api/ollama/agent-preview', async (req, res) => {
+  const { plan } = req.body || {};
+  const ops = plan && Array.isArray(plan.operations) ? plan.operations : [];
+  if (!ops.length) return res.status(400).json({ error: 'No operations to preview' });
+
+  const preview = [];
+  for (const op of ops) {
+    if (!op || typeof op !== 'object') continue;
+    try {
+      if (op.op === 'mkdir') {
+        const abs = resolvePath(op.path);
+        let exists = false;
+        try { await fs.promises.access(abs); exists = true; } catch {}
+        preview.push({ op: 'mkdir', path: op.path, exists, files: [] });
+
+      } else if (op.op === 'move') {
+        const fromAbs = resolvePath(op.from);
+        let stat = null;
+        try { stat = await fs.promises.lstat(fromAbs); } catch {}
+        preview.push({
+          op: 'move', from: op.from, to: op.to,
+          exists: !!stat,
+          isDir: stat ? stat.isDirectory() : false,
+          size: stat ? stat.size : 0,
+          files: stat ? [{ name: path.basename(op.from), from: op.from, to: op.to, size: stat.size }] : []
+        });
+
+      } else if (op.op === 'move_filter' || op.op === 'move_except_filter' || op.op === 'move_except') {
+        const dirAbs    = resolvePath(op.dir);
+        const targetAbs = resolvePath(op.target);
+        let entries = [];
+        try { entries = await fs.promises.readdir(dirAbs, { withFileTypes: true }); } catch {}
+
+        const files = [];
+        for (const e of entries) {
+          const name  = e.name;
+          const ext   = path.extname(name).toLowerCase().replace('.', '');
+          const m     = mime.lookup(name) || '';
+          const isImg = (m && String(m).startsWith('image/')) || IMAGE_EXTS.has(ext);
+          let include = false;
+
+          if (op.op === 'move_filter') {
+            const f = String(op.filter || '');
+            include =
+              (f === 'directories'     && e.isDirectory()) ||
+              (f === 'files'           && e.isFile()) ||
+              (f === 'image_files'     && e.isFile() && isImg) ||
+              (f === 'non_image_files' && e.isFile() && !isImg);
+          } else if (op.op === 'move_except_filter') {
+            const excF = String(op.except_filter || '');
+            const excluded =
+              (excF === 'image_files'     && e.isFile() && isImg) ||
+              (excF === 'non_image_files' && e.isFile() && !isImg) ||
+              (excF === 'directories'     && e.isDirectory()) ||
+              (excF === 'files'           && e.isFile());
+            include = !excluded;
+          } else if (op.op === 'move_except') {
+            const exc = (op.except || []).map(n => String(n).toLowerCase());
+            include = !exc.includes(name.toLowerCase());
+          }
+
+          if (include) {
+            let size = 0;
+            try { const s = await fs.promises.stat(path.join(dirAbs, name)); size = s.size; } catch {}
+            files.push({
+              name,
+              from: toVirtual(path.join(dirAbs, name)),
+              to:   toVirtual(path.join(targetAbs, name)),
+              size,
+              isDir: e.isDirectory()
+            });
+          }
+        }
+        preview.push({ op: op.op, dir: op.dir, target: op.target, files, total: files.length });
+      }
+    } catch (e) {
+      preview.push({ op: op.op, error: e.message, files: [] });
+    }
+  }
+  res.json({ preview });
+});
+
 // Agent: execute a previously returned plan
 app.post('/api/ollama/agent-run', async (req, res) => {
   const { plan } = req.body || {};
@@ -2145,8 +2394,13 @@ app.post('/api/ollama/agent-run', async (req, res) => {
   if (!ops.length) return res.status(400).json({ error: 'No operations to run' });
 
   const results = [];
+  const ALLOWED_OPS = new Set(['mkdir','move','move_filter','move_except','move_except_filter']);
   for (const op of ops) {
     if (!op || typeof op !== 'object') continue;
+    if (!ALLOWED_OPS.has(op.op)) {
+      results.push({ op: op.op, status: 'error', error: 'Unknown operation type — rejected' });
+      continue;
+    }
     try {
       if (op.op === 'mkdir') {
         const abs = resolvePath(op.path);
@@ -2199,6 +2453,32 @@ app.post('/api/ollama/agent-run', async (req, res) => {
           moved++;
         }
         results.push({ op: 'move_except', dir: op.dir, target: op.target, except: op.except, moved, skipped, status: 'ok' });
+      } else if (op.op === 'move_except_filter') {
+        // Move everything in dir EXCEPT items matching the category
+        const dirAbs    = resolvePath(op.dir);
+        const targetAbs = resolvePath(op.target);
+        await fs.promises.mkdir(targetAbs, { recursive: true });
+        const entries = await fs.promises.readdir(dirAbs, { withFileTypes: true });
+        let moved = 0, skipped = 0;
+        const excFilter = String(op.except_filter || '');
+        for (const e of entries) {
+          const name = e.name;
+          const ext  = path.extname(name).toLowerCase().replace('.', '');
+          const m    = mime.lookup(name) || '';
+          const isImg = (m && String(m).startsWith('image/')) || IMAGE_EXTS.has(ext);
+          // Determine if this item matches the EXCLUDED category
+          const isExcluded =
+            (excFilter === 'image_files'     && e.isFile() && isImg) ||
+            (excFilter === 'non_image_files'  && e.isFile() && !isImg) ||
+            (excFilter === 'directories'      && e.isDirectory()) ||
+            (excFilter === 'files'            && e.isFile());
+          if (isExcluded) { skipped++; continue; }
+          let dstAbs = path.join(targetAbs, name);
+          dstAbs = await findFreeName(dstAbs);
+          await fs.promises.rename(path.join(dirAbs, name), dstAbs);
+          moved++;
+        }
+        results.push({ op: 'move_except_filter', dir: op.dir, target: op.target, except_filter: op.except_filter, moved, skipped, status: 'ok' });
       }
     } catch (e) {
       results.push({ ...op, status: 'error', error: e.message });
@@ -2330,7 +2610,7 @@ app.post('/api/ollama/search', async (req, res) => {
 // ─────────────────────────────────────────────────────────────────
 // CATCH-ALL — must be LAST, after every /api/* route is registered
 // ─────────────────────────────────────────────────────────────────
-app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
 server.listen(PORT, () => {
   log('info', 'Nova File Manager started', {

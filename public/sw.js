@@ -1,7 +1,7 @@
-// Nova File Manager — Service Worker v2
+// Nova File Manager — Service Worker v3 (PWA Enhanced)
 // Strategy: stale-while-revalidate for shell, network-only for API
 
-const CACHE_NAME  = 'nova-v2';
+const CACHE_NAME  = 'nova-v3';
 const OFFLINE_URL = '/offline.html';
 const PRECACHE    = [
   '/',
@@ -45,6 +45,23 @@ self.addEventListener('fetch', ev => {
   // API: always network-only — never cache live file data
   if (url.pathname.startsWith('/api/')) return;
 
+  // Navigate requests: serve cached shell, fallback to offline
+  if (request.mode === 'navigate') {
+    ev.respondWith(
+      caches.open(CACHE_NAME).then(cache =>
+        cache.match('/').then(cached => {
+          return fetch(request)
+            .then(response => {
+              if (response.ok) cache.put(request, response.clone());
+              return response;
+            })
+            .catch(() => cached || cache.match(OFFLINE_URL));
+        })
+      )
+    );
+    return;
+  }
+
   // Everything else: stale-while-revalidate
   ev.respondWith(
     caches.open(CACHE_NAME).then(cache =>
@@ -55,9 +72,34 @@ self.addEventListener('fetch', ev => {
             return response;
           })
           .catch(() => cached || caches.match(OFFLINE_URL));
-        // Return cached immediately; update cache in background
         return cached || fetched;
       })
     )
   );
+});
+
+// ── Push Notifications (future-ready) ────────────────────────────
+self.addEventListener('push', ev => {
+  if (!ev.data) return;
+  const data = ev.data.json();
+  ev.waitUntil(
+    self.registration.showNotification(data.title || 'Nova', {
+      body: data.body || '',
+      icon: '/icon-192.png',
+      badge: '/icon-120.png',
+      data: data
+    })
+  );
+});
+
+self.addEventListener('notificationclick', ev => {
+  ev.notification.close();
+  ev.waitUntil(clients.openWindow('/'));
+});
+
+// ── Background Sync (future-ready) ───────────────────────────────
+self.addEventListener('sync', ev => {
+  if (ev.tag === 'nova-sync') {
+    ev.waitUntil(Promise.resolve());
+  }
 });

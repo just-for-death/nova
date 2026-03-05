@@ -1,6 +1,6 @@
 FROM node:20-alpine
 
-RUN apk add --no-cache rsync bash util-linux coreutils findutils
+RUN apk add --no-cache rsync bash util-linux coreutils findutils unzip
 
 WORKDIR /app
 
