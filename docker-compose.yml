@@ -1,0 +1,62 @@
+services:
+  filemanager:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nova-filemanager
+    ports:
+      - "${HOST_PORT:-9898}:9898"
+    volumes:
+      - /:/hostroot:rw
+    environment:
+      - ROOT_PATH=/hostroot
+      - PORT=9898
+      - NODE_ENV=production
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - COPY_WORKERS=${COPY_WORKERS:-4}
+      # Gotify (optional) - push notifications for jobs + cancels + AI ops
+      - GOTIFY_URL=${GOTIFY_URL:-}
+      - GOTIFY_TOKEN=${GOTIFY_TOKEN:-}
+      # Ollama AI (optional) - set to your Ollama host
+      # If Ollama runs on the host machine use host-gateway below
+      - OLLAMA_URL=${OLLAMA_URL:-http://host-gateway:11434}
+      - OLLAMA_TEXT_MODEL=${OLLAMA_TEXT_MODEL:-llama3.2:1b}
+      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-moondream:latest}
+      - OLLAMA_EMBED_MODEL=${OLLAMA_EMBED_MODEL:-nomic-embed-text:latest}
+    extra_hosts:
+      - "host-gateway:host-gateway"
+    restart: unless-stopped
+    privileged: true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9898/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    labels:
+      - "com.nova.description=Nova File Manager"
+      - "com.nova.version=8"
+
+  monitor:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitor
+    container_name: nova-monitor
+    restart: unless-stopped
+    depends_on:
+      filemanager:
+        condition: service_healthy
+    ports:
+      - "${MONITOR_PORT:-9091}:9090"
+    environment:
+      - MONITOR_TARGET=http://nova-filemanager:9898
+      - CHECK_INTERVAL_SEC=${CHECK_INTERVAL_SEC:-30}
+      - FAIL_THRESHOLD=${FAIL_THRESHOLD:-3}
+      - GOTIFY_URL=${GOTIFY_URL:-}
+      - GOTIFY_TOKEN=${GOTIFY_TOKEN:-}
+      - APP_NAME=Nova File Manager
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090"]
+      interval: 60s
+      timeout: 5s
+      retries: 3

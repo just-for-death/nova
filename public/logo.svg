@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="bg-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#2a2016" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#1a1916" stop-opacity="1"/>
+    </radialGradient>
+    <radialGradient id="core-grad" cx="45%" cy="40%" r="55%">
+      <stop offset="0%" stop-color="#f5b090"/>
+      <stop offset="45%" stop-color="#e07848"/>
+      <stop offset="100%" stop-color="#7a2e10"/>
+    </radialGradient>
+    <radialGradient id="outer-glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#c4663a" stop-opacity="0.25"/>
+      <stop offset="100%" stop-color="#c4663a" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft-glow">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="text-glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="512" height="512" rx="80" fill="url(#bg-glow)"/>
+
+  <!-- Outer glow halo -->
+  <circle cx="256" cy="256" r="220" fill="url(#outer-glow)"/>
+
+  <!-- Hex grid background pattern (subtle) -->
+  <g opacity="0.06" stroke="#c4663a" stroke-width="1" fill="none">
+    <polygon points="256,80 320,116 320,188 256,224 192,188 192,116"/>
+    <polygon points="320,116 384,152 384,224 320,260 256,224 256,152"/>
+    <polygon points="192,116 256,152 256,224 192,260 128,224 128,152"/>
+    <polygon points="256,224 320,260 320,332 256,368 192,332 192,260"/>
+    <polygon points="320,260 384,296 384,368 320,404 256,368 256,296"/>
+    <polygon points="192,260 256,296 256,368 192,404 128,368 128,296"/>
+  </g>
+
+  <!-- Main hexagon border -->
+  <polygon points="256,56 432,157 432,355 256,456 80,355 80,157"
+    fill="none" stroke="#c4663a" stroke-width="3" stroke-opacity="0.5"
+    filter="url(#soft-glow)"/>
+
+  <!-- Inner hexagon fill -->
+  <polygon points="256,82 412,169 412,343 256,430 100,343 100,169"
+    fill="#1e1c19" stroke="#c4663a" stroke-width="1" stroke-opacity="0.2"/>
+
+  <!-- N letter — the star of the show -->
+  <text x="256" y="320" font-family="'IBM Plex Mono', 'Courier New', monospace" font-size="240"
+    font-weight="600" fill="url(#core-grad)" text-anchor="middle"
+    filter="url(#text-glow)">N</text>
+
+  <!-- Accent constellation dots -->
+  <circle cx="370" cy="152" r="6" fill="#f09060" opacity="0.9"/>
+  <circle cx="370" cy="152" r="14" fill="#f09060" opacity="0.15"/>
+  <circle cx="390" cy="185" r="3" fill="#e07848" opacity="0.6"/>
+  <circle cx="142" cy="358" r="4" fill="#c4663a" opacity="0.5"/>
+  <circle cx="122" cy="325" r="2.5" fill="#e07848" opacity="0.4"/>
+
+  <!-- Small orbit ring around accent dot -->
+  <circle cx="370" cy="152" r="22" fill="none" stroke="#f09060" stroke-width="1"
+    stroke-opacity="0.3" stroke-dasharray="4 6"/>
+</svg>

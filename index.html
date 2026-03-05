@@ -1,0 +1,2646 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nova — File Manager</title>
+
+<!-- Favicon & Icons -->
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="icon" type="image/x-icon" href="/favicon.svg">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="apple-touch-icon" sizes="120x120" href="/icon-120.png">
+<link rel="apple-touch-icon" sizes="152x152" href="/icon-152.png">
+<link rel="apple-touch-icon" sizes="167x167" href="/icon-167.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="apple-touch-icon" sizes="192x192" href="/icon-192.png">
+
+<!-- PWA / Web App Manifest -->
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#c4663a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Nova">
+<script>
+  // Service Worker registration
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js')
+        .catch(err => console.warn('SW registration failed:', err));
+    });
+  }
+  // PWA install prompt
+  let _deferredInstall = null;
+  window.addEventListener('beforeinstallprompt', ev => {
+    ev.preventDefault();
+    _deferredInstall = ev;
+    const btn = document.getElementById('btn-install');
+    if (btn) btn.style.display = '';
+  });
+  window.addEventListener('appinstalled', () => {
+    _deferredInstall = null;
+    const btn = document.getElementById('btn-install');
+    if (btn) btn.style.display = 'none';
+  });
+  function triggerInstall() {
+    if (!_deferredInstall) return;
+    _deferredInstall.prompt();
+    _deferredInstall.userChoice.then(() => { _deferredInstall = null; });
+  }
+</script>
+
+<!-- SEO / Social -->
+<meta name="description" content="Nova — a fast, modern self-hosted file manager">
+<meta name="robots" content="noindex, nofollow">
+
+<!-- Fonts -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:        #1a1916;
+  --surface:   #211f1c;
+  --surface2:  #2a2825;
+  --surface3:  #332f2b;
+  --surface4:  #3d3835;
+  --border:    rgba(255,240,220,0.07);
+  --border2:   rgba(255,240,220,0.12);
+  --text:      #f0e8dc;
+  --text2:     #a89880;
+  --text3:     #6a5e50;
+  --accent:    #c4663a;
+  --accent2:   #e07848;
+  --accent3:   #f09060;
+  --accentbg:  rgba(196,102,58,0.12);
+  --accentbg2: rgba(196,102,58,0.20);
+  --green:     #5aaa78;
+  --red:       #d95f5f;
+  --yellow:    #c9944a;
+  --blue:      #5a8fcc;
+  --radius:    10px;
+  --rsm:       6px;
+  --tr:        0.14s ease;
+  --font-serif: 'Lora', ui-serif, Georgia, Cambria, serif;
+  --font-sans:  'IBM Plex Sans', system-ui, sans-serif;
+  --font-mono:  'IBM Plex Mono', 'Fira Code', monospace;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  font-size: 15px;
+}
+
+/* ── TITLEBAR ─────────────────────────────────────── */
+.titlebar {
+  display: flex; align-items: center; gap: 14px;
+  padding: 0 20px; height: 52px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.logo {
+  display: flex; align-items: center; gap: 9px;
+  font-family: var(--font-serif);
+  font-weight: 600; font-size: 17px;
+  letter-spacing: -0.2px;
+  color: var(--text);
+}
+.logo-mark {
+  width: 30px; height: 30px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; line-height: 1;
+  box-shadow: 0 2px 8px rgba(196,102,58,0.35);
+}
+.breadcrumb {
+  display: flex; align-items: center; gap: 3px;
+  flex: 1; min-width: 0;
+  font-size: 12.5px; color: var(--text3);
+  font-family: var(--font-mono);
+  overflow: hidden;
+}
+.bc-item {
+  cursor: pointer; padding: 4px 7px;
+  border-radius: 5px;
+  white-space: nowrap; transition: var(--tr);
+  max-width: 180px; overflow: hidden; text-overflow: ellipsis;
+}
+.bc-item:hover { background: var(--surface3); color: var(--text2); }
+.bc-item.active { color: var(--text2); }
+.bc-sep { color: var(--text3); font-size: 11px; opacity: 0.5; }
+.tbar-actions { display: flex; align-items: center; gap: 6px; }
+.tbar-btn {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 13px; border-radius: var(--rsm);
+  border: 1px solid var(--border2);
+  background: var(--surface2); color: var(--text2);
+  cursor: pointer; font-size: 12.5px;
+  font-family: var(--font-sans); font-weight: 500;
+  transition: var(--tr); white-space: nowrap;
+}
+.tbar-btn:hover { background: var(--surface3); color: var(--text); }
+.tbar-btn.primary {
+  background: var(--accent); color: #fff;
+  border-color: transparent;
+  box-shadow: 0 1px 6px rgba(196,102,58,0.3);
+}
+.tbar-btn.primary:hover { background: var(--accent2); }
+
+/* ── LAYOUT ───────────────────────────────────────── */
+.main { display: flex; flex: 1; min-height: 0; }
+
+/* ── SIDEBAR ──────────────────────────────────────── */
+.sidebar {
+  width: 210px; flex-shrink: 0;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  overflow: hidden;
+}
+.sb-section { padding: 14px 8px 4px; }
+.sb-label {
+  font-size: 10px; font-weight: 600;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--text3); padding: 0 8px 7px;
+  font-family: var(--font-sans);
+}
+.sb-item {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 10px; border-radius: var(--rsm);
+  cursor: pointer; color: var(--text2);
+  font-size: 14px; transition: var(--tr);
+  margin-bottom: 1px;
+}
+.sb-item:hover { background: var(--surface2); color: var(--text); }
+.sb-item.active {
+  background: var(--accentbg);
+  color: var(--accent3);
+}
+.sb-icon { width: 20px; text-align: center; font-size: 16px; flex-shrink: 0; }
+.sb-badge {
+  margin-left: auto; font-size: 10px;
+  background: var(--surface4); color: var(--text3);
+  padding: 1px 6px; border-radius: 10px; font-weight: 600;
+}
+.sb-divider { height: 1px; background: var(--border); margin: 6px 12px; }
+
+.disk-card {
+  margin: 8px; padding: 13px;
+  background: var(--surface2); border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+.disk-head {
+  font-size: 11px; color: var(--text3);
+  margin-bottom: 9px; display: flex; justify-content: space-between;
+  font-family: var(--font-sans);
+}
+.disk-track { height: 4px; background: var(--surface4); border-radius: 2px; overflow: hidden; margin-bottom: 7px; }
+.disk-fill {
+  height: 100%; border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--accent3));
+  transition: width 0.6s ease;
+}
+.disk-nums { font-size: 10.5px; color: var(--text3); font-family: var(--font-mono); }
+
+/* ── CONTENT ──────────────────────────────────────── */
+.content { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+
+/* ── TOOLBAR ──────────────────────────────────────── */
+.toolbar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface); flex-shrink: 0;
+}
+.tb-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 32px; height: 32px;
+  border-radius: var(--rsm); border: 1px solid transparent;
+  background: transparent; color: var(--text3);
+  cursor: pointer; font-size: 15px; transition: var(--tr);
+}
+.tb-btn:hover { background: var(--surface2); color: var(--text2); border-color: var(--border); }
+.tb-btn:disabled { opacity: 0.25; cursor: not-allowed; }
+.tb-sep { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }
+.tb-btn-txt {
+  display: flex; align-items: center; gap: 5px;
+  padding: 0 10px; height: 32px;
+  border-radius: var(--rsm); border: 1px solid transparent;
+  background: transparent; color: var(--text2);
+  cursor: pointer; font-size: 12.5px;
+  font-family: var(--font-sans); font-weight: 500; transition: var(--tr);
+}
+.tb-btn-txt:hover { background: var(--surface2); color: var(--text); border-color: var(--border); }
+.tb-btn-txt.danger { color: var(--red); }
+.tb-btn-txt.danger:hover { background: rgba(217,95,95,0.1); border-color: rgba(217,95,95,0.2); }
+
+.search {
+  flex: 1; max-width: 260px; margin-left: auto;
+  display: flex; align-items: center; gap: 7px;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: var(--rsm); padding: 0 10px; height: 32px;
+}
+.search input {
+  flex: 1; background: none; border: none; outline: none;
+  color: var(--text); font-size: 12.5px; font-family: var(--font-sans);
+}
+.search input::placeholder { color: var(--text3); }
+.search-icon { color: var(--text3); font-size: 13px; }
+
+.view-toggle { display: flex; gap: 2px; }
+.vbtn {
+  width: 30px; height: 30px; border-radius: 5px; border: none;
+  background: transparent; color: var(--text3); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 13px; transition: var(--tr);
+}
+.vbtn.on { background: var(--surface2); color: var(--text2); }
+.ai-btn {
+  color: var(--accent2) !important;
+  font-size: 14px !important;
+  border: 1px solid var(--accentbg2) !important;
+  background: var(--accentbg) !important;
+  transition: all 0.15s;
+}
+.ai-btn:hover { background: var(--accentbg2) !important; box-shadow: 0 0 8px var(--accentbg2); }
+#pinned-list .sb-item { position: relative; }
+.ctx-item .ctx-ico { min-width: 18px; }
+
+/* ── FILE AREA ────────────────────────────────────── */
+.file-area {
+  flex: 1; overflow-y: auto; padding: 14px 16px;
+  position: relative;
+}
+.file-area::-webkit-scrollbar { width: 5px; }
+.file-area::-webkit-scrollbar-thumb { background: var(--surface4); border-radius: 3px; }
+
+/* GRID */
+.file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(116px, 1fr)); gap: 7px; }
+.fitem-grid {
+  display: flex; flex-direction: column; align-items: center;
+  padding: 14px 8px 10px; border-radius: var(--radius);
+  border: 1px solid transparent; cursor: pointer;
+  transition: var(--tr); position: relative; text-align: center;
+  user-select: none;
+}
+.fitem-grid:hover { background: var(--surface2); border-color: var(--border); }
+.fitem-grid.sel { background: var(--accentbg); border-color: rgba(196,102,58,0.3); }
+.fitem-grid.cut { opacity: 0.4; }
+.grid-icon { font-size: 42px; margin-bottom: 8px; line-height: 1; }
+.grid-name {
+  font-size: 12.5px; color: var(--text); font-weight: 400;
+  word-break: break-word; line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden;
+  font-family: var(--font-sans);
+}
+.grid-size { font-size: 11px; color: var(--text3); margin-top: 3px; font-family: var(--font-mono); }
+
+/* LIST */
+.list-head {
+  display: grid; grid-template-columns: 22px 22px 1fr 90px 140px 80px;
+  gap: 0 12px; padding: 5px 12px;
+  font-size: 10.5px; color: var(--text3);
+  font-weight: 500; letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--border); margin-bottom: 3px;
+  font-family: var(--font-sans);
+}
+.file-list { display: flex; flex-direction: column; gap: 1px; }
+.fitem-list {
+  display: grid; grid-template-columns: 22px 22px 1fr 90px 140px 80px;
+  gap: 0 12px; align-items: center;
+  padding: 8px 12px; border-radius: var(--rsm);
+  border: 1px solid transparent; cursor: pointer;
+  transition: var(--tr); user-select: none;
+}
+.fitem-list:hover { background: var(--surface2); border-color: var(--border); }
+.fitem-list.sel { background: var(--accentbg); border-color: rgba(196,102,58,0.3); }
+.fitem-list.cut { opacity: 0.4; }
+.list-icon { font-size: 18px; }
+.list-name {
+  font-size: 14px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-family: var(--font-sans);
+}
+.list-size { font-size: 12.5px; color: var(--text2); font-family: var(--font-mono); }
+.list-date { font-size: 12px; color: var(--text2); font-family: var(--font-mono); white-space: nowrap; }
+.list-perm { font-size: 11.5px; color: var(--text3); font-family: var(--font-mono); }
+
+.empty-state {
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; height: 55%;
+  color: var(--text3); gap: 10px;
+}
+.empty-icon { font-size: 44px; opacity: 0.3; }
+.empty-txt { font-family: var(--font-serif); font-style: italic; font-size: 15px; }
+
+/* ── STATUS BAR ───────────────────────────────────── */
+.statusbar {
+  display: flex; align-items: center; gap: 14px;
+  padding: 0 18px; height: 28px;
+  background: var(--surface); border-top: 1px solid var(--border);
+  font-size: 11.5px; color: var(--text3); flex-shrink: 0;
+  font-family: var(--font-mono);
+}
+.status-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+.status-divider { color: var(--surface4); }
+
+/* ── CONTEXT MENU ─────────────────────────────────── */
+.ctxmenu {
+  position: fixed;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: var(--radius);
+  padding: 5px; min-width: 186px; z-index: 9999;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.6), 0 0 0 1px rgba(255,240,220,0.03);
+  animation: ctx-pop 0.1s ease;
+  backdrop-filter: blur(16px);
+}
+@keyframes ctx-pop { from { opacity:0; transform:scale(0.95) translateY(-3px); } to { opacity:1; transform:none; } }
+.ctx-item {
+  display: flex; align-items: center; gap: 9px;
+  padding: 8px 10px; border-radius: 6px;
+  cursor: pointer; font-size: 13px; color: var(--text2);
+  transition: var(--tr); font-family: var(--font-sans);
+}
+.ctx-item:hover { background: var(--surface3); color: var(--text); }
+.ctx-item.red { color: var(--red); }
+.ctx-item.red:hover { background: rgba(217,95,95,0.1); }
+.ctx-ico { width: 17px; text-align: center; font-size: 13px; }
+.ctx-sep { height: 1px; background: var(--border); margin: 3px 0; }
+
+/* ── MODALS ───────────────────────────────────────── */
+.overlay {
+  position: fixed; inset: 0;
+  background: rgba(10,9,8,0.7);
+  backdrop-filter: blur(5px);
+  z-index: 1000; display: flex;
+  align-items: center; justify-content: center;
+  animation: fade 0.15s ease;
+}
+@keyframes fade { from { opacity:0; } to { opacity:1; } }
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  border-radius: 14px; padding: 26px;
+  min-width: 360px; max-width: 500px;
+  box-shadow: 0 30px 80px rgba(0,0,0,0.7);
+  animation: modal-drop 0.18s ease;
+}
+@keyframes modal-drop { from { opacity:0; transform:translateY(12px) scale(0.96); } to { opacity:1; transform:none; } }
+.modal h2 {
+  font-family: var(--font-serif); font-weight: 600;
+  font-size: 18px; margin-bottom: 7px; letter-spacing: -0.3px;
+  color: var(--text);
+}
+.modal p { color: var(--text2); font-size: 13.5px; margin-bottom: 20px; line-height: 1.55; }
+.modal-input {
+  width: 100%;
+  background: var(--surface2); border: 1px solid var(--border2);
+  border-radius: var(--rsm); padding: 10px 12px;
+  color: var(--text); font-size: 13.5px; font-family: var(--font-sans);
+  outline: none; margin-bottom: 16px; transition: var(--tr);
+}
+.modal-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accentbg); }
+.modal-row { display: flex; gap: 8px; justify-content: flex-end; }
+.mbtn {
+  padding: 9px 18px; border-radius: var(--rsm);
+  border: 1px solid var(--border2); background: var(--surface2);
+  color: var(--text2); cursor: pointer;
+  font-size: 13px; font-family: var(--font-sans); font-weight: 500;
+  transition: var(--tr);
+}
+.mbtn:hover { background: var(--surface3); color: var(--text); }
+.mbtn.ok { background: var(--accent); color: #fff; border-color: transparent; box-shadow: 0 1px 5px rgba(196,102,58,0.3); }
+.mbtn.ok:hover { background: var(--accent2); }
+.mbtn.bad { background: var(--red); color: #fff; border-color: transparent; }
+.mbtn.bad:hover { background: #e86a6a; }
+
+/* ── PROGRESS PANEL ───────────────────────────────── */
+.progress-panel {
+  position: fixed; bottom: 44px; right: 20px;
+  width: 330px;
+  background: var(--surface2); border: 1px solid var(--border2);
+  border-radius: var(--radius); padding: 15px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.55);
+  z-index: 500; animation: slideup 0.2s ease;
+}
+@keyframes slideup { from { opacity:0; transform:translateY(16px); } to { opacity:1; transform:none; } }
+.pp-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 11px; }
+.pp-title {
+  font-family: var(--font-serif); font-weight: 600;
+  font-size: 13.5px; display: flex; align-items: center; gap: 8px;
+}
+.pp-close { cursor: pointer; color: var(--text3); font-size: 18px; transition: var(--tr); line-height: 1; }
+.pp-close:hover { color: var(--text); }
+.pp-file { font-size: 11px; color: var(--text2); margin-bottom: 8px; font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pp-track { height: 5px; background: var(--surface4); border-radius: 3px; overflow: hidden; margin-bottom: 7px; }
+.pp-fill {
+  height: 100%; border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent3));
+  transition: width 0.25s ease; position: relative; overflow: hidden;
+}
+.pp-fill::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.18), transparent);
+  animation: shimmer 1.4s infinite;
+}
+@keyframes shimmer { from { transform:translateX(-100%); } to { transform:translateX(100%); } }
+.pp-stats { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--text3); font-family: var(--font-mono); }
+.phase-pill {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2px 8px; border-radius: 10px;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; font-family: var(--font-sans);
+}
+.phase-copying  { background: rgba(90,143,204,0.15); color: var(--blue); }
+.phase-cleaning { background: rgba(201,148,74,0.15); color: var(--yellow); }
+.phase-done     { background: rgba(90,170,120,0.15); color: var(--green); }
+.phase-error     { background: rgba(217,95,95,0.15);  color: var(--red); }
+.phase-cancelled { background: rgba(201,148,74,0.15);  color: var(--yellow); }
+.phase-starting  { background: rgba(255,240,220,0.08); color: var(--text3); }
+
+/* ── JOBS HISTORY ─────────────────────────────────── */
+.jobs-badge {
+  position: fixed; bottom: 44px; right: 368px;
+  background: var(--surface2); border: 1px solid var(--border2);
+  border-radius: var(--radius); padding: 8px 14px;
+  font-size: 12px; color: var(--text2); cursor: pointer;
+  display: flex; align-items: center; gap: 7px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  transition: var(--tr); z-index: 400;
+  font-family: var(--font-sans);
+}
+.jobs-badge:hover { background: var(--surface3); color: var(--text); }
+.jobs-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+
+/* ── DRAG OVER ────────────────────────────────────── */
+.file-area.dragover {
+  background: rgba(196,102,58,0.04);
+  outline: 2px dashed rgba(196,102,58,0.35);
+  outline-offset: -8px;
+  border-radius: var(--radius);
+}
+
+/* ── TOAST ────────────────────────────────────────── */
+.toast-wrap { position: fixed; bottom: 50px; left: 50%; transform: translateX(-50%); z-index: 9000; display: flex; flex-direction: column; gap: 5px; align-items: center; pointer-events: none; }
+.toast {
+  background: var(--surface2); border: 1px solid var(--border2);
+  border-radius: 8px; padding: 9px 16px;
+  font-size: 13px; color: var(--text);
+  box-shadow: 0 6px 24px rgba(0,0,0,0.45);
+  animation: toast-in 0.18s ease;
+  display: flex; align-items: center; gap: 7px;
+  font-family: var(--font-sans);
+  white-space: nowrap;
+}
+@keyframes toast-in { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+.toast.ok  { border-color: rgba(90,170,120,0.3); }
+.toast.err { border-color: rgba(217,95,95,0.3); }
+
+/* ── SPINNER ──────────────────────────────────────── */
+.spinner { width: 14px; height: 14px; border: 2px solid var(--surface4); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.55s linear infinite; flex-shrink: 0; }
+@keyframes spin { to { transform:rotate(360deg); } }
+
+/* ── CHECKBOXES ───────────────────────────────────── */
+.item-cb {
+  position: absolute; top: 6px; left: 6px;
+  width: 18px; height: 18px;
+  border-radius: 5px; border: 1.5px solid var(--border2);
+  background: var(--surface3);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; cursor: pointer;
+  opacity: 0; transition: opacity 0.12s ease, background 0.12s ease;
+  z-index: 2; color: #fff; flex-shrink: 0;
+}
+.fitem-grid:hover .item-cb,
+.fitem-grid.sel .item-cb { opacity: 1; }
+.fitem-grid.sel .item-cb { background: var(--accent); border-color: var(--accent); }
+
+.item-cb-list {
+  width: 18px; height: 18px;
+  border-radius: 5px; border: 1.5px solid var(--border2);
+  background: var(--surface3);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; cursor: pointer; flex-shrink: 0;
+  opacity: 0; transition: opacity 0.12s ease, background 0.12s ease;
+  color: #fff;
+}
+.fitem-list:hover .item-cb-list,
+.fitem-list.sel .item-cb-list { opacity: 1; }
+.fitem-list.sel .item-cb-list { background: var(--accent); border-color: var(--accent); }
+
+/* ── THUMBNAILS ───────────────────────────────────── */
+.grid-thumb {
+  width: 72px; height: 72px; margin-bottom: 8px;
+  border-radius: 6px; overflow: hidden;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--surface3);
+  border: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.grid-thumb img {
+  width: 100%; height: 100%; object-fit: cover;
+  border-radius: 5px; display: block;
+}
+.grid-thumb-fail { font-size: 42px; line-height: 1; }
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-thumb { background: var(--surface4); border-radius: 3px; }
+/* ── FILE EDITOR ─────────────────────────────────── */
+.editor-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+.editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.editor-filename {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text2);
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.editor-dirty { color: var(--accent2); }
+.editor-dirty::after { content: ' ●'; font-size: 10px; }
+.editor-status {
+  font-size: 11px;
+  color: var(--text3);
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+.editor-textarea {
+  flex: 1;
+  width: 100%;
+  background: var(--surface);
+  color: var(--text);
+  border: none;
+  outline: none;
+  resize: none;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.65;
+  padding: 18px 20px;
+  tab-size: 2;
+  caret-color: var(--accent2);
+  overflow-y: auto;
+}
+.editor-textarea::selection { background: var(--accentbg2); }
+.editor-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  flex-shrink: 0;
+  gap: 8px;
+}
+/* override modal sizing for editor */
+.modal.editor-modal {
+  width: min(92vw, 900px);
+  height: min(88vh, 720px);
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.modal.editor-modal h2 { display: none; }
+
+/* ── RESPONSIVE / TOUCH OPTIMIZATIONS ───────────────── */
+@media (max-width: 1024px) {
+  body { font-size: 14px; }
+  .sidebar { width: 190px; }
+  .search { max-width: 210px; }
+  .list-head, .fitem-list { grid-template-columns: 22px 22px 1fr 80px 110px; }
+  .list-head span:nth-child(6), .fitem-list .list-perm { display: none; }
+}
+@media (max-width: 768px) {
+  .titlebar { flex-wrap: wrap; align-items: flex-start; height: auto; padding: 8px 12px; gap: 8px 10px; }
+  .logo { font-size: 16px; }
+  .breadcrumb { order: 3; width: 100%; margin-top: 2px; }
+  .tbar-actions { margin-left: auto; flex-wrap: wrap; gap: 6px; }
+  .main { flex-direction: column; }
+  .sidebar { width: 100%; flex-direction: row; border-right: none; border-bottom: 1px solid var(--border); overflow-x: auto; }
+  .sb-section { padding: 10px 8px; }
+  .disk-card { display: none; }
+  .toolbar { flex-wrap: wrap; row-gap: 6px; padding: 8px 10px; }
+  .search { order: 99; flex: 1 1 100%; max-width: none; }
+  .view-toggle { margin-left: auto; }
+  .file-area { padding: 10px 10px 14px; }
+  .file-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
+  .modal { width: min(96vw, 500px); max-width: 96vw; }
+  .modal.editor-modal { width: 100vw; height: 100vh; border-radius: 0; }
+}
+@media (pointer: coarse) {
+  .tbar-btn, .tb-btn, .tb-btn-txt, .vbtn, .sb-item, .ctx-item, .mbtn { min-height: 36px; }
+  .tb-btn, .tb-btn-txt, .tbar-btn { padding-top: 9px; padding-bottom: 9px; }
+}
+</style>
+</head>
+<body>
+
+<div class="titlebar">
+  <div class="logo"><div class="logo-mark">⬡</div>Nova</div>
+  <div class="breadcrumb" id="breadcrumb"></div>
+  <div class="tbar-actions">
+    <button class="tbar-btn" onclick="showUpload()">↑ Upload</button>
+    <button class="tbar-btn primary" onclick="showMkdir()">+ New Folder</button>
+      <button class="tbar-btn" onclick="showNewFile()" title="New text file" style="border-color:var(--border2)">+ New File</button>
+  </div>
+</div>
+
+<div class="main">
+  <div class="sidebar">
+    <div class="sb-section">
+      <div class="sb-label">Places</div>
+      <div class="sb-item active" onclick="nav('/')" data-path="/"><span class="sb-icon">⌂</span>Root</div>
+      <div class="sb-item" onclick="nav('/home')" data-path="/home"><span class="sb-icon">⌂</span>Home</div>
+      <div class="sb-item" onclick="nav('/etc')" data-path="/etc"><span class="sb-icon">⚙</span>Config</div>
+      <div class="sb-item" onclick="nav('/var')" data-path="/var"><span class="sb-icon">📊</span>Var</div>
+      <div class="sb-item" onclick="nav('/tmp')" data-path="/tmp"><span class="sb-icon">⚡</span>Temp</div>
+      <div class="sb-item" onclick="nav('/mnt')" data-path="/mnt"><span class="sb-icon">💾</span>Mounts</div>
+      <div class="sb-item" onclick="nav('/media')" data-path="/media"><span class="sb-icon">📀</span>Media</div>
+    </div>
+    <div class="sb-divider"></div>
+    <div class="sb-section" id="pinned-section" style="display:none">
+      <div class="sb-label" style="display:flex;justify-content:space-between;align-items:center">
+        <span>Pinned</span>
+      </div>
+      <div id="pinned-list"></div>
+    </div>
+    <div class="sb-divider" id="pinned-divider" style="display:none"></div>
+    <div class="sb-section">
+      <div class="sb-label">System</div>
+      <div class="sb-item" onclick="showTrash()"><span class="sb-icon">🗑</span>Trash<span class="sb-badge" id="trash-badge" style="display:none">0</span></div>
+      <div class="sb-item" onclick="showJobs()"><span class="sb-icon">⚙</span>Jobs<span class="sb-badge" id="jobs-badge" style="display:none">0</span></div>
+    </div>
+    <div style="flex:1"></div>
+    <div class="disk-card">
+      <div class="disk-head"><span>Storage</span><span id="disk-pct">—</span></div>
+      <div class="disk-track"><div class="disk-fill" id="disk-fill" style="width:0%"></div></div>
+      <div class="disk-nums" id="disk-nums">—</div>
+    </div>
+  </div>
+
+  <div class="content">
+    <div class="toolbar">
+      <button class="tb-btn" id="btn-back" onclick="goBack()" disabled title="Back">←</button>
+      <button class="tb-btn" id="btn-fwd" onclick="goFwd()" disabled title="Forward">→</button>
+      <button class="tb-btn" onclick="reload()" title="Refresh">↺</button>
+      <button class="tb-btn" id="btn-selall" onclick="toggleSelectAll()" title="Select All">☑</button>
+      <div class="tb-sep"></div>
+      <button class="tb-btn-txt" id="btn-cut"    style="display:none" onclick="cutSel()">✂ Cut</button>
+      <button class="tb-btn-txt" id="btn-copy"   style="display:none" onclick="copySel()">⎘ Copy</button>
+      <button class="tb-btn-txt" id="btn-paste"  style="display:none" onclick="doPaste()">⊞ Paste</button>
+      <button class="tb-btn-txt danger" id="btn-del" style="display:none" onclick="delSel()">🗑 Delete</button>
+      <div class="search">
+        <span class="search-icon">⌕</span>
+        <input type="text" id="search" placeholder="Search files… (Enter for AI search)" oninput="filterFiles()" onkeydown="if(event.key==='Enter'&&this.value.startsWith('?'))aiSemanticSearch(this.value.slice(1).trim())">
+      </div>
+      <button class="vbtn ai-btn" id="btn-ai-search" title="AI: click for search, right-click for models" onclick="showAISearch()" oncontextmenu="event.preventDefault();showAIModels()">✦</button>
+      <button id="btn-install" onclick="triggerInstall()" title="Install Nova as app" style="display:none;background:var(--accentbg);border:1px solid var(--accent);color:var(--accent2);font-size:12px;padding:4px 10px;border-radius:6px;cursor:pointer;font-family:var(--font-sans);font-weight:500;white-space:nowrap">⊕ Install</button>
+      <div class="view-toggle">
+        <button class="vbtn on" id="vgrid" onclick="setView('grid')" title="Grid">⊞</button>
+        <button class="vbtn" id="vlist" onclick="setView('list')" title="List">☰</button>
+      </div>
+    </div>
+
+    <div class="file-area" id="file-area"
+      ondragover="onDragOver(event)"
+      ondragleave="onDragLeave(event)"
+      ondrop="onDrop(event)"
+      oncontextmenu="bgCtxMenu(event)">
+    </div>
+
+    <div class="statusbar">
+      <div class="status-dot" id="sdot"></div>
+      <span id="stext">Ready</span>
+      <span class="status-divider">│</span>
+      <span id="ssel"></span>
+    </div>
+  </div>
+</div>
+
+<div class="toast-wrap" id="toasts"></div>
+<div id="modal-root"></div>
+<div id="progress-panel" style="display:none" class="progress-panel">
+  <div class="pp-head">
+    <div class="pp-title">
+      <div class="spinner" id="pp-spin"></div>
+      <span id="pp-label">Transfer</span>
+      <span class="phase-pill phase-starting" id="pp-phase">Starting</span>
+    </div>
+    <button id="pp-cancel-btn" onclick="cancelActiveJob()" style="background:none;border:1px solid var(--border2);color:var(--text3);font-size:11px;font-family:var(--font-sans);padding:3px 10px;border-radius:5px;cursor:pointer;margin-right:6px;display:none">Cancel</button>
+    <span class="pp-close" onclick="closeProgress()">×</span>
+  </div>
+  <div class="pp-file" id="pp-file">—</div>
+  <div class="pp-track"><div class="pp-fill" id="pp-bar" style="width:0%"></div></div>
+  <div class="pp-stats">
+    <span id="pp-pct">0%</span>
+    <span id="pp-detail"></span>
+  </div>
+</div>
+<input type="file" id="file-input" multiple style="display:none" onchange="uploadFiles(this.files)">
+
+<script>
+// ═══════════════════════════════════════════
+// CONSTANTS
+// ═══════════════════════════════════════════
+const IMAGE_EXTS_UI = new Set(['jpg','jpeg','png','gif','webp','bmp','tiff','tif','svg','heic','heif','avif']);
+const EDITABLE_EXTS_UI = new Set([
+    'txt','md','markdown','log','json','yaml','yml','toml','xml','html','css',
+    'js','ts','jsx','tsx','py','rb','go','rs','sh','bash','zsh','env',
+    'conf','cfg','ini','properties','gitignore','dockerfile','makefile',
+    'vue','svelte','graphql','proto','csv','tsv','sql','php','java','c',
+    'cpp','h','hpp','cs','swift','kt','r','lua','pl','fish','bat','ps1'
+  ]);
+
+// ═══════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════
+let curPath = '/';
+let hist = ['/'], histIdx = 0;
+let entries = [], filtered = [];
+let selected = new Set();
+let viewMode = (()=>{ try { return localStorage.getItem('nova_viewMode') || 'grid'; } catch { return 'grid'; } })();
+let clipboard = null;
+let ws = null;
+let trashItems = [];
+let activeJobs = new Map();
+
+// ═══════════════════════════════════════════
+// WS
+// ═══════════════════════════════════════════
+// wsId persists in localStorage so jobs can be re-attached even after
+// closing and fully reopening the browser (sessionStorage is cleared on close).
+let wsId = localStorage.getItem('nova_wsId');
+if (!wsId) {
+  wsId = 'c-' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+  localStorage.setItem('nova_wsId', wsId);
+}
+
+function initWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}`);
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'register', clientId: wsId }));
+  ws.onmessage = ev => { try { handleWS(JSON.parse(ev.data)); } catch {} };
+  ws.onclose = () => setTimeout(initWS, 2500);
+}
+
+const finishedJobs = new Set(); // track notified jobs to prevent double-fire
+
+function handleWS(msg) {
+  if (msg.type === 'job_update') {
+    const job = msg.job;
+    const prev = activeJobs.get(job.jobId);
+    activeJobs.set(job.jobId, job);
+    updateProgressPanel(job);
+    updateJobsBadge();
+    // Only fire completion events once per job
+    if (job.status === 'done' && !finishedJobs.has(job.jobId)) {
+      finishedJobs.add(job.jobId);
+      hideCancelBtn();
+      setTimeout(() => closeProgress(), 2500);
+      const label = job.type === 'delete' || job.type === 'delete-permanent' ? '🗑 Delete complete'
+                  : job.type === 'trash-empty' ? '🗑 Trash emptied'
+                  : job.type === 'upload'       ? `✓ Upload saved (${(job.sources||[]).length} file(s))`
+                  : job.type === 'zip'           ? '🗜 Zip complete'
+                  : job.type === 'unzip'         ? '📦 Extracted successfully'
+                  : `✓ ${job.operation === 'move' ? 'Move' : 'Copy'} complete`;
+      toast(label, 'ok');
+      reload(); loadTrash();
+    } else if (job.status === 'cancelled' && !finishedJobs.has(job.jobId)) {
+      finishedJobs.add(job.jobId);
+      hideCancelBtn();
+      const cancelMsg = job.type === 'zip'   ? '⏹ Zip cancelled — open Jobs to resume'
+                      : job.type === 'unzip' ? '⏹ Extract cancelled — open Jobs to resume'
+                      : '⏹ Transfer cancelled — open Jobs to resume';
+      toast(cancelMsg, 'warn');
+      reload();
+    } else if (job.status === 'error' && !finishedJobs.has(job.jobId)) {
+      finishedJobs.add(job.jobId);
+      hideCancelBtn();
+      toast('⚠ ' + (job.error || 'Operation failed'), 'err');
+    }
+  }
+}
+
+// ═══════════════════════════════════════════
+// NAVIGATION
+// ═══════════════════════════════════════════
+async function nav(p) {
+  curPath = p;
+  if (histIdx < hist.length - 1) hist = hist.slice(0, histIdx + 1);
+  if (hist[histIdx] !== p) { hist.push(p); histIdx++; }
+  await loadDir(p);
+  navBtns(); sidebarActive();
+}
+
+function goBack() { if (histIdx > 0) { histIdx--; curPath = hist[histIdx]; loadDir(curPath); navBtns(); } }
+function goFwd()  { if (histIdx < hist.length - 1) { histIdx++; curPath = hist[histIdx]; loadDir(curPath); navBtns(); } }
+function navBtns() {
+  document.getElementById('btn-back').disabled = histIdx <= 0;
+  document.getElementById('btn-fwd').disabled  = histIdx >= hist.length - 1;
+}
+function sidebarActive() {
+  document.querySelectorAll('.sb-item[data-path]').forEach(el =>
+    el.classList.toggle('active', el.dataset.path === curPath));
+}
+
+async function loadDir(p) {
+  setStatus('Loading…', false);
+  selected.clear(); selUI();
+  try {
+    const r = await fetch(`/api/list?path=${enc(p)}`);
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    entries = d.entries.sort((a,b) => {
+      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+    filtered = [...entries];
+    renderFiles();
+    renderBC(p);
+    setStatus(`${entries.length} items`, true);
+  } catch(e) {
+    setStatus('Error: ' + e.message, false);
+    toast('Failed: ' + e.message, 'err');
+  }
+}
+
+function reload() { loadDir(curPath); }
+
+// ═══════════════════════════════════════════
+// BREADCRUMB
+// ═══════════════════════════════════════════
+function renderBC(p) {
+  const bc = document.getElementById('breadcrumb');
+  const parts = p.split('/').filter(Boolean);
+  let html = `<span class="bc-item ${!parts.length?'active':''}" data-navpath="/">root</span>`;
+  let acc = '';
+  parts.forEach((pt, i) => {
+    acc += '/' + pt;
+    html += `<span class="bc-sep">/</span><span class="bc-item ${i===parts.length-1?'active':''}" data-navpath="${esc(acc)}">${esc(pt)}</span>`;
+  });
+  bc.innerHTML = html;
+  bc.querySelectorAll('[data-navpath]').forEach(el => {
+    el.addEventListener('click', () => nav(el.dataset.navpath));
+  });
+}
+
+// ═══════════════════════════════════════════
+// RENDER FILES
+// ═══════════════════════════════════════════
+const ICONS = {
+  dir: '📁', img: '🖼', video: '🎬', audio: '🎵', pdf: '📄',
+  zip: '📦', code: '⌨', text: '📝', config: '⚙', web: '🌐',
+  dot: '🔒', file: '📄'
+};
+function fileIcon(e) {
+  if (e.type === 'directory') return ICONS.dir;
+  const m = e.mime || '', x = e.name.split('.').pop().toLowerCase();
+  if (m.startsWith('image/')) return ICONS.img;
+  if (m.startsWith('video/')) return ICONS.video;
+  if (m.startsWith('audio/')) return ICONS.audio;
+  if (m.includes('pdf')) return ICONS.pdf;
+  if (m.includes('zip')||m.includes('tar')||m.includes('gz')||m.includes('rar')||x==='7z') return ICONS.zip;
+  if (['js','ts','jsx','tsx','py','go','rs','cpp','c','h','java','sh','bash','rb','php','lua','swift'].includes(x)) return ICONS.code;
+  if (['html','css','scss','svg'].includes(x)) return ICONS.web;
+  if (['json','yaml','yml','toml','xml','env','ini','conf','cfg'].includes(x)) return ICONS.config;
+  if (['md','txt','log','rst'].includes(x)) return ICONS.text;
+  if (e.name.startsWith('.')) return ICONS.dot;
+  return ICONS.file;
+}
+function fmtSize(b) {
+  if (!b) return '—';
+  if (b < 1024) return b+'B';
+  if (b < 1024**2) return (b/1024).toFixed(1)+'K';
+  if (b < 1024**3) return (b/1024**2).toFixed(1)+'M';
+  return (b/1024**3).toFixed(2)+'G';
+}
+function fmtDate(d) {
+  if (!d) return '—';
+  const dt = new Date(d);
+  return dt.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' '+dt.toLocaleTimeString(undefined,{hour:'2-digit',minute:'2-digit'});
+}
+function filterFiles() {
+  const q = document.getElementById('search').value.toLowerCase();
+  filtered = q ? entries.filter(e => e.name.toLowerCase().includes(q)) : [...entries];
+  renderFiles();
+}
+function renderFiles() {
+  const area = document.getElementById('file-area');
+  if (!filtered.length) {
+    area.innerHTML = `<div class="empty-state"><div class="empty-icon">📂</div><div class="empty-txt">This folder is empty</div></div>`;
+    return;
+  }
+  const cuts = clipboard && clipboard.op === 'move' ? new Set(clipboard.items.map(i=>i.path)) : new Set();
+  if (viewMode === 'grid') {
+    area.innerHTML = `<div class="file-grid">${filtered.map(e=>gridItem(e,cuts)).join('')}</div>`;
+  } else {
+    area.innerHTML = `<div class="list-head"><span></span><span></span><span>Name</span><span>Size</span><span>Modified</span><span>Perms</span></div><div class="file-list">${filtered.map(e=>listItem(e,cuts)).join('')}</div>`;
+  }
+  area.querySelectorAll('[data-path]').forEach(el => {
+    el.addEventListener('click', ev => clickItem(ev, el.dataset.path, el.dataset.type));
+    el.addEventListener('dblclick', () => dblItem(el.dataset.path, el.dataset.type));
+    el.addEventListener('contextmenu', ev => ctxMenu(ev, el.dataset.path, el.dataset.type));
+  });
+}
+function gridItem(e, cuts) {
+  const s = selected.has(e.path), c = cuts.has(e.path);
+  const isImg = e.mime && e.mime.startsWith('image/');
+  const iconHtml = isImg
+    ? `<div class="grid-thumb"><img src="/api/preview?path=${enc(e.path)}" loading="lazy" onerror="this.parentNode.innerHTML='<span class=grid-thumb-fail>🖼</span>'"></div>`
+    : `<div class="grid-icon">${fileIcon(e)}</div>`;
+  return `<div class="fitem-grid ${s?'sel':''} ${c?'cut':''}" data-path="${e.path}" data-type="${e.type}">
+    <div class="item-cb">${s?'✓':''}</div>
+    ${iconHtml}
+    <div class="grid-name">${esc(e.name)}</div>
+    <div class="grid-size">${e.type==='directory'?'':fmtSize(e.size)}</div>
+  </div>`;
+}
+function listItem(e, cuts) {
+  const s = selected.has(e.path), c = cuts.has(e.path);
+  return `<div class="fitem-list ${s?'sel':''} ${c?'cut':''}" data-path="${e.path}" data-type="${e.type}">
+    <span class="item-cb-list">${s?'✓':''}</span>
+    <span class="list-icon">${fileIcon(e)}</span>
+    <span class="list-name">${esc(e.name)}</span>
+    <span class="list-size">${e.type==='directory'?'—':fmtSize(e.size)}</span>
+    <span class="list-date">${fmtDate(e.modified)}</span>
+    <span class="list-perm">${e.permissions||'—'}</span>
+  </div>`;
+}
+
+// ═══════════════════════════════════════════
+// SELECTION
+// ═══════════════════════════════════════════
+let lastSel = null;
+function clickItem(ev, p, type) {
+  // Clicking the checkbox always toggles selection regardless of type
+  const cbClicked = ev.target.classList.contains('item-cb') || ev.target.classList.contains('item-cb-list');
+
+  if (type === 'directory' && !cbClicked && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
+    // Plain click on a folder = navigate
+    nav(p); return;
+  }
+  if (ev.shiftKey && lastSel) {
+    const all = filtered.map(e=>e.path), a = all.indexOf(lastSel), b = all.indexOf(p);
+    const [lo,hi] = a<b?[a,b]:[b,a];
+    all.slice(lo,hi+1).forEach(x => selected.add(x));
+  } else if (ev.ctrlKey || ev.metaKey || cbClicked) {
+    selected.has(p) ? selected.delete(p) : selected.add(p);
+  } else {
+    selected.clear(); selected.add(p);
+  }
+  lastSel = p; renderFiles(); selUI();
+}
+function dblItem(p, type) {
+  if (type === 'directory') { nav(p); return; }
+  const ext = p.split('.').pop().toLowerCase();
+  if (EDITABLE_EXTS_UI.has(ext)) { openEditor(p); return; }
+  previewFile(p);
+}
+function selUI() {
+  const n = selected.size;
+  document.getElementById('ssel').textContent = n > 0 ? `${n} selected` : '';
+  ['btn-cut','btn-copy','btn-del'].forEach(id => document.getElementById(id).style.display = n?'':'none');
+  document.getElementById('btn-paste').style.display = clipboard?'':'none';
+  // Highlight select-all button when all visible items are selected
+  const selAllBtn = document.getElementById('btn-selall');
+  if (selAllBtn) selAllBtn.style.color = (n > 0 && n === filtered.length) ? 'var(--accent3)' : '';
+}
+function toggleSelectAll() {
+  if (selected.size === filtered.length && filtered.length > 0) {
+    selected.clear();
+  } else {
+    filtered.forEach(e => selected.add(e.path));
+  }
+  lastSel = null; renderFiles(); selUI();
+}
+
+// ═══════════════════════════════════════════
+// CLIPBOARD
+// ═══════════════════════════════════════════
+function copySel() { clipboard = { items: getSelEntries(), op: 'copy' }; toast(`⎘ ${clipboard.items.length} copied`, 'ok'); selUI(); }
+function cutSel()  { clipboard = { items: getSelEntries(), op: 'move' }; toast(`✂ ${clipboard.items.length} cut`, 'ok'); renderFiles(); selUI(); }
+function getSelEntries() { return filtered.filter(e => selected.has(e.path)); }
+async function doPaste() {
+  if (!clipboard) return;
+  const sources = clipboard.items.map(i=>i.path), op = clipboard.op;
+  clipboard = null; selUI();
+  await doTransfer(sources, curPath, op);
+}
+
+// ═══════════════════════════════════════════
+// TRANSFER
+// ═══════════════════════════════════════════
+async function doTransfer(sources, destination, operation, conflictResolutions = null) {
+  // If we already have resolutions (called from conflict modal), skip check
+  if (conflictResolutions !== null) {
+    return _startTransfer(sources, destination, operation, conflictResolutions);
+  }
+
+  // Pre-flight: check for conflicts
+  let checkData;
+  try {
+    const cr = await fetch('/api/transfer/check', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sources, destination })
+    });
+    checkData = await cr.json();
+  } catch (e) {
+    // If check fails, proceed anyway with empty resolutions
+    checkData = { conflicts: [] };
+  }
+
+  if (!checkData.conflicts || checkData.conflicts.length === 0) {
+    return _startTransfer(sources, destination, operation, {});
+  }
+
+  // Show conflict resolution modal
+  showConflictModal(checkData.conflicts, checkData.truncated, sources, destination, operation);
+}
+
+async function _startTransfer(sources, destination, operation, conflictResolutions) {
+  showProgressPanel(`${operation==='move'?'Moving':'Copying'} ${sources.length} item(s)`);
+  const r = await fetch('/api/transfer', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ sources, destination, operation, clientId: wsId, conflictResolutions })
+  });
+  const d = await r.json();
+  if (d.jobId) activeJobs.set(d.jobId, { jobId: d.jobId, status: 'running', percent: 0, phase: 'starting', operation });
+  updateJobsBadge();
+}
+
+// ═══════════════════════════════════════════
+// CONFLICT RESOLUTION MODAL
+// ═══════════════════════════════════════════
+function showConflictModal(conflicts, truncated, sources, destination, operation) {
+  const m = mkModal();
+  m.style.maxWidth = '640px';
+  m.style.minWidth = '480px';
+
+  // Resolution state: destPath → 'overwrite'|'skip'|'keepboth'
+  const resolutions = {};
+  conflicts.forEach(c => { resolutions[c.destPath] = 'overwrite'; });
+
+  function fmtSz(b) {
+    if (b === undefined || b === null) return '—';
+    if (b < 1024) return b + ' B';
+    if (b < 1024*1024) return (b/1024).toFixed(1) + ' KB';
+    if (b < 1024*1024*1024) return (b/1024/1024).toFixed(1) + ' MB';
+    return (b/1024/1024/1024).toFixed(2) + ' GB';
+  }
+  function fmtDate(d) {
+    if (!d) return '—';
+    return new Date(d).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+  }
+  function allSame() {
+    const vals = Object.values(resolutions);
+    return vals.length > 0 && vals.every(v => v === vals[0]) ? vals[0] : null;
+  }
+
+  function render() {
+    const same = allSame();
+    m.innerHTML = `
+      <h2>⚠ ${conflicts.length}${truncated?'+':''} conflict${conflicts.length!==1?'s':''} found</h2>
+      <p style="margin-bottom:14px;color:var(--text2);font-size:13px">
+        ${conflicts.length} file${conflicts.length!==1?'s':''} already exist at the destination.
+        Choose what to do with each one${truncated?' (showing first 500 — remaining will use bulk action)':'.'}</p>
+
+      <div style="display:flex;gap:6px;margin-bottom:12px;align-items:center">
+        <span style="font-size:11.5px;color:var(--text3);margin-right:4px">Apply to all:</span>
+        ${['overwrite','skip','keepboth'].map(v => `
+          <button onclick="applyAll('${v}')" style="
+            padding:4px 12px;border-radius:6px;font-size:11.5px;cursor:pointer;
+            font-family:var(--font-sans);font-weight:500;
+            background:${same===v?'var(--accent)':'var(--surface3)'};
+            color:${same===v?'#fff':'var(--text2)'};
+            border:1px solid ${same===v?'transparent':'var(--border2)'};
+            transition:0.12s">${v==='overwrite'?'⬆ Overwrite all':v==='skip'?'⊘ Skip all':'⊕ Keep both'}</button>
+        `).join('')}
+      </div>
+
+      <div style="max-height:340px;overflow-y:auto;margin-bottom:14px;border:1px solid var(--border);border-radius:8px;overflow-x:hidden">
+        ${conflicts.map((c, i) => `
+          <div style="padding:10px 12px;${i>0?'border-top:1px solid var(--border)':''};display:grid;grid-template-columns:1fr auto;gap:8px;align-items:start">
+            <div style="min-width:0">
+              <div style="font-size:12.5px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono)" title="${esc(c.name)}">${esc(c.name)}</div>
+              <div style="display:flex;gap:16px;margin-top:5px;font-size:11px;font-family:var(--font-mono)">
+                <div>
+                  <div style="color:var(--text3);margin-bottom:1px">Incoming</div>
+                  <div style="color:var(--text2)">${fmtSz(c.srcSize)}</div>
+                  <div style="color:var(--text3)">${fmtDate(c.srcMtime)}</div>
+                </div>
+                <div style="color:var(--border2);align-self:center;font-size:16px">→</div>
+                <div>
+                  <div style="color:var(--text3);margin-bottom:1px">Existing</div>
+                  <div style="color:var(--text2)">${fmtSz(c.dstSize)}</div>
+                  <div style="color:var(--text3)">${fmtDate(c.dstMtime)}</div>
+                </div>
+              </div>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
+              ${['overwrite','skip','keepboth'].map(v => `
+                <button onclick="setOne('${esc(c.destPath)}','${v}')" style="
+                  padding:3px 10px;border-radius:5px;font-size:11px;cursor:pointer;
+                  font-family:var(--font-sans);font-weight:500;white-space:nowrap;
+                  background:${resolutions[c.destPath]===v?'var(--accent)':'var(--surface3)'};
+                  color:${resolutions[c.destPath]===v?'#fff':'var(--text2)'};
+                  border:1px solid ${resolutions[c.destPath]===v?'transparent':'var(--border2)'};
+                  transition:0.12s">
+                  ${v==='overwrite'?'⬆ Overwrite':v==='skip'?'⊘ Skip':'⊕ Keep both'}
+                </button>
+              `).join('')}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+
+      <div style="padding:8px 12px;background:var(--surface2);border-radius:6px;margin-bottom:14px;font-size:11.5px;color:var(--text3)">
+        <span style="color:var(--text2);font-weight:500">Summary: </span>
+        ${['overwrite','skip','keepboth'].map(v => {
+          const n = Object.values(resolutions).filter(r=>r===v).length;
+          if (!n) return '';
+          const label = v==='overwrite'?'overwrite':v==='skip'?'skip':'keep both';
+          return `<span style="margin-right:12px">${n} ${label}</span>`;
+        }).join('')}
+      </div>
+
+      <div class="modal-row">
+        <button class="mbtn" onclick="closeModal()" style="margin-right:auto">Cancel</button>
+        <button class="mbtn ok" onclick="applyResolutions()">
+          ${operation==='move'?'Move':'Copy'} with these settings
+        </button>
+      </div>`;
+
+    // Attach helpers to window so inline onclick works
+    window._conflictState = { resolutions, conflicts, sources, destination, operation };
+  }
+
+  window.applyAll = function(val) {
+    const s = window._conflictState;
+    s.conflicts.forEach(c => { s.resolutions[c.destPath] = val; });
+    render();
+  };
+  window.setOne = function(destPath, val) {
+    const s = window._conflictState;
+    s.resolutions[destPath] = val;
+    render();
+  };
+  window.applyResolutions = function() {
+    const s = window._conflictState;
+    closeModal();
+    _startTransfer(s.sources, s.destination, s.operation, s.resolutions);
+  };
+
+  render();
+}
+
+// Right-click on empty area
+function bgCtxMenu(ev) {
+  if (ev.target.closest('[data-path]')) return; // let item ctxmenu handle it
+  ev.preventDefault();
+  document.querySelectorAll('.ctxmenu').forEach(e=>e.remove());
+  const m = document.createElement('div');
+  m.className = 'ctxmenu';
+  const extraItems = [];
+  if (clipboard) extraItems.push({icon:'⊞', label:'Paste', fn:()=>doPaste()});
+  if (selected.size > 0) extraItems.push({icon:'🗜', label:'Zip selected…', fn:()=>doZipSelected(null,null)});
+  const items = [
+    {icon:'📁', label:'New Folder',    fn:()=>showMkdir()},
+    {icon:'📄', label:'New Text File', fn:()=>showNewFile()},
+    ...(extraItems.length ? [{sep:true}, ...extraItems] : []),
+  ];
+  items.forEach(item => {
+    if (item.sep) { const sep = document.createElement('div'); sep.className='ctx-sep'; m.appendChild(sep); return; }
+    const el = document.createElement('div');
+    el.className = 'ctx-item';
+    el.innerHTML = `<span class="ctx-ico">${item.icon}</span>${esc(item.label)}`;
+    el.addEventListener('click', () => {
+      m.remove(); document.removeEventListener('click', dismiss);
+      setTimeout(() => item.fn(), 150);
+    });
+    m.appendChild(el);
+  });
+  const {innerWidth:W,innerHeight:H}=window;
+  let x=ev.clientX,y=ev.clientY;
+  document.body.appendChild(m);
+  const r=m.getBoundingClientRect();
+  if(x+r.width>W)x=W-r.width-8;
+  if(y+r.height>H)y=H-r.height-8;
+  m.style.left=x+'px'; m.style.top=y+'px';
+  const dismiss=e=>{if(!m.contains(e.target)){m.remove();document.removeEventListener('click',dismiss);}};
+  setTimeout(()=>document.addEventListener('click',dismiss),50);
+}
+
+function positionCtxMenu(m, ev) {
+  // Helper kept for compatibility
+  const {innerWidth:W,innerHeight:H}=window;
+  let x=ev.clientX,y=ev.clientY;
+  document.body.appendChild(m);
+  const r=m.getBoundingClientRect();
+  if(x+r.width>W)x=W-r.width-8;
+  if(y+r.height>H)y=H-r.height-8;
+  m.style.left=x+'px'; m.style.top=y+'px';
+}
+// ═══════════════════════════════════════════
+function delSel() {
+  const items = getSelEntries();
+  confirm2({
+    title: `Delete ${items.length} item(s)?`,
+    msg: `${items.slice(0,3).map(i=>`"${esc(i.name)}"`).join(', ')}${items.length>3?' and '+(items.length-3)+' more':''} will be moved to Trash.`,
+    label: 'Move to Trash', cls: 'bad',
+    onOk: async () => {
+      const r = await fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths:items.map(i=>i.path),clientId:wsId})});
+      const d = await r.json();
+      selected.clear(); selUI(); reload(); loadTrash();
+      if (d.jobId) {
+        activeJobs.set(d.jobId, { jobId: d.jobId, status: 'running', percent: 0, phase: 'deleting', type: 'delete' });
+        showProgressPanel(`Deleting ${items.length} item(s)…`); updateJobsBadge();
+        toast('🗑 Deleting in background…', 'ok');
+      } else {
+        toast('🗑 Moved to Trash', 'ok');
+      }
+    }
+  });
+}
+function permDel() {
+  const items = getSelEntries();
+  confirm2({
+    title: `Permanently delete ${items.length} item(s)?`,
+    msg: `This cannot be undone.`,
+    label: 'Delete Forever', cls: 'bad',
+    onOk: async () => {
+      const r = await fetch('/api/delete-permanent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths:items.map(i=>i.path),clientId:wsId})});
+      const d = await r.json();
+      selected.clear(); selUI(); reload();
+      if (d.jobId) {
+        activeJobs.set(d.jobId, { jobId: d.jobId, status: 'running', percent: 0, phase: 'deleting', type: 'delete-permanent' });
+        showProgressPanel(`Permanently deleting ${items.length} item(s)…`); updateJobsBadge();
+        toast('💀 Deleting in background…', 'ok');
+      } else {
+        toast('💀 Deleted permanently', 'ok');
+      }
+    }
+  });
+}
+
+// ═══════════════════════════════════════════
+// TRASH
+// ═══════════════════════════════════════════
+async function loadTrash() {
+  const r = await fetch('/api/trash');
+  const d = await r.json();
+  trashItems = d.items || [];
+  const b = document.getElementById('trash-badge');
+  b.textContent = trashItems.length; b.style.display = trashItems.length ? '' : 'none';
+}
+function showTrash() {
+  const m = mkModal();
+  m.innerHTML = `<h2>🗑 Trash</h2><p>Items moved to trash can be restored.</p>
+    <div style="max-height:280px;overflow-y:auto;margin-bottom:16px">
+      ${!trashItems.length
+        ? '<div style="text-align:center;color:var(--text3);padding:28px;font-style:italic;font-family:var(--font-serif)">Trash is empty</div>'
+        : trashItems.map(it=>`
+          <div style="display:flex;align-items:center;gap:9px;padding:8px;border-radius:6px;border:1px solid var(--border);margin-bottom:3px;background:var(--surface2)">
+            <span style="flex:1;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.name)}</span>
+            <span style="font-size:11px;color:var(--text3);font-family:var(--font-mono);white-space:nowrap">${fmtDate(it.deletedAt)}</span>
+            <button class="mbtn" style="padding:4px 9px;font-size:11.5px" onclick="restoreItem('${it.id}')">Restore</button>
+          </div>`).join('')}
+    </div>
+    <div class="modal-row">
+      ${trashItems.length?`<button class="mbtn bad" onclick="emptyTrash()">Empty Trash</button>`:''}
+      <button class="mbtn" onclick="closeModal()">Close</button>
+    </div>`;
+}
+async function restoreItem(id) {
+  await fetch('/api/trash/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  closeModal(); reload(); loadTrash(); toast('✓ Restored','ok');
+}
+async function emptyTrash() {
+  confirm2({ title:'Empty Trash?', msg:'All trashed items will be permanently deleted.', label:'Empty', cls:'bad',
+    onOk: async () => {
+      const r = await fetch('/api/trash/empty',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientId:wsId})});
+      const d = await r.json();
+      closeModal(); loadTrash();
+      if (d.jobId) {
+        activeJobs.set(d.jobId, { jobId: d.jobId, status: 'running', percent: 0, phase: 'deleting', type: 'trash-empty' });
+        showProgressPanel('Emptying trash…'); updateJobsBadge();
+        toast('🗑 Emptying trash in background…', 'ok');
+      } else {
+        toast('🗑 Trash emptied', 'ok');
+      }
+    }
+  });
+}
+
+// ═══════════════════════════════════════════
+// JOBS PANEL
+// ═══════════════════════════════════════════
+function updateJobsBadge() {
+  const running = [...activeJobs.values()].filter(j=>j.status==='running').length;
+  const b = document.getElementById('jobs-badge');
+  b.textContent = running; b.style.display = running ? '' : 'none';
+}
+async function showJobs() {
+  const r = await fetch('/api/jobs');
+  const d = await r.json();
+  const m = mkModal();
+  m.style.maxWidth = '580px'; m.style.minWidth = '460px';
+  const jobs = d.jobs || [];
+
+  function jobStatusIcon(j) {
+    if (j.status === 'done')      return '<span style="color:var(--green)">&#10003;</span>';
+    if (j.status === 'error')     return '<span style="color:var(--red)">&#10007;</span>';
+    if (j.status === 'cancelled') return '<span style="color:var(--yellow)">&#9632;</span>';
+    return '<span style="display:inline-block;animation:spin 0.8s linear infinite">&#8635;</span>';
+  }
+  function elapsed(j) {
+    const start = new Date(j.startedAt);
+    const end = j.finishedAt ? new Date(j.finishedAt) : new Date();
+    const s = Math.round((end - start) / 1000);
+    return s < 60 ? s + 's' : Math.floor(s/60) + 'm ' + (s%60) + 's';
+  }
+  function jobHtml(j) {
+    const statusClass = j.status === 'done' ? 'done' : j.status === 'error' ? 'error' : (j.phase || 'starting');
+    const srcs = j.sources || [];
+    const srcPreview = srcs.slice(0,2).map(s => s.split('/').pop()).join(', ') + (srcs.length > 2 ? ' +' + (srcs.length-2) + ' more' : '');
+    const dest = j.destination ? j.destination.split('/').slice(-2).join('/') : '-';
+    const logLines = j.log || [];
+    const logId = 'log-' + j.jobId;
+    const errBorder = j.status === 'error' ? ';border-color:rgba(217,95,95,0.35)' : j.status === 'cancelled' ? ';border-color:rgba(201,148,74,0.3)' : '';
+    const barColor = j.status === 'error' ? 'var(--red)' : j.status === 'done' ? 'var(--green)' : 'linear-gradient(90deg,var(--accent),var(--accent3))';
+    const typeIcon  = j.type==='zip' ? '🗜' : j.type==='unzip' ? '📦' : j.type==='upload' ? '↑' : j.type==='delete'||j.type==='delete-permanent' ? '🗑' : j.type==='trash-empty' ? '🗑' : '⇄';
+    const typeLabel = j.type==='zip' ? 'Zip' : j.type==='unzip' ? 'Unzip' : j.type==='upload' ? 'Upload' : j.type==='delete' ? 'Delete' : j.type==='delete-permanent' ? 'Delete' : j.type==='trash-empty' ? 'Empty Trash' : (j.operation==='move'?'Move':'Copy');
+    const isResumable = (j.status === 'error' || j.status === 'cancelled');
+    const isCancellable = j.status === 'running';
+    const hasResume = isResumable && (j.type === 'transfer' || j.type === 'zip' || j.type === 'unzip');
+    const hasCancel = isCancellable && (j.type === 'transfer' || j.type === 'zip' || j.type === 'unzip');
+    const resumeFn  = j.type==='zip'    ? `resumeZip('${j.jobId}')`
+                    : j.type==='unzip'  ? `resumeUnzip('${j.jobId}')`
+                    : `resumeTransfer('${j.jobId}')`;
+    const cancelFn  = j.type==='zip'||j.type==='unzip' ? `cancelZipJob('${j.jobId}',this)` : `cancelJobFromPanel('${j.jobId}',this)`;
+    return `<div style="padding:12px;border-radius:10px;border:1px solid var(--border)${errBorder};margin-bottom:8px;background:var(--surface2)">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span style="font-size:16px">${jobStatusIcon(j)}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:13px;color:var(--text);font-weight:500">${typeIcon} ${typeLabel} &middot; ${srcs.length} item${srcs.length!==1?'s':''}</div>
+          <div style="font-size:11px;color:var(--text3);font-family:var(--font-mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(srcPreview)}</div>
+        </div>
+        <span class="phase-pill phase-${statusClass}">${j.status==='running'?j.phase||'running':j.status}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:7px;font-size:11px;color:var(--text3);font-family:var(--font-mono)">
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">&#8594; ${esc(dest)}</span>
+        <span style="white-space:nowrap;flex-shrink:0">${elapsed(j)} &middot; ${fmtDate(j.startedAt)}</span>
+      </div>
+      <div style="height:5px;background:var(--surface4);border-radius:3px;overflow:hidden;margin-bottom:5px">
+        <div style="height:100%;width:${j.percent||0}%;background:${barColor};border-radius:3px;transition:width 0.3s ease"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;font-size:10.5px;color:var(--text3);font-family:var(--font-mono);margin-bottom:${logLines.length||j.error||hasResume||hasCancel?'8px':'0'}">
+        <span>${j.currentFile?'&rarr; '+esc(j.currentFile):''}</span>
+        <span>${j.percent||0}%${(j.filePercent&&j.filePercent!==j.percent)?' &middot; file: '+j.filePercent+'%':''}</span>
+      </div>
+      ${j.error ? `<div style="padding:6px 10px;background:rgba(217,95,95,0.08);border:1px solid rgba(217,95,95,0.2);border-radius:6px;font-size:11.5px;color:var(--red);font-family:var(--font-mono);margin-bottom:6px">${esc(j.error)}</div>` : ''}
+      ${hasResume ? `<button onclick="${resumeFn}" style="background:var(--accentbg);border:1px solid var(--accent);color:var(--accent2);font-size:11.5px;font-family:var(--font-sans);font-weight:500;padding:5px 14px;border-radius:6px;cursor:pointer;margin-bottom:${logLines.length?'6px':'0'}">&#9654; Resume${j.type==='zip'?' (restart zip)':j.type==='unzip'?' (re-extract)':' from where it stopped'}</button>` : ''}
+      ${hasCancel ? `<button onclick="${cancelFn}" style="background:rgba(217,95,95,0.08);border:1px solid rgba(217,95,95,0.25);color:var(--red);font-size:11.5px;font-family:var(--font-sans);font-weight:500;padding:5px 14px;border-radius:6px;cursor:pointer;margin-bottom:${logLines.length?'6px':'0'}">&#9632; Cancel</button>` : ''}
+      ${logLines.length ? `<div>
+        <button onclick="var el=document.getElementById('${logId}');el.style.display=el.style.display==='none'?'block':'none'" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:11px;font-family:var(--font-mono);padding:2px 0;margin-bottom:4px">${logLines.length} log line${logLines.length!==1?'s':''} &#9660;</button>
+        <div id="${logId}" style="display:none;background:var(--bg);border-radius:6px;padding:8px;max-height:110px;overflow-y:auto;font-family:var(--font-mono);font-size:10.5px;color:var(--red);line-height:1.5;border:1px solid var(--border)">
+          ${logLines.map(l=>'<div>'+esc(l)+'</div>').join('')}
+        </div></div>` : ''}
+    </div>`;
+  }
+
+  m.innerHTML = `<h2>&#9881; Background Jobs</h2>
+    <p style="margin-bottom:14px">Transfer jobs run server-side and survive browser disconnects.</p>
+    <div style="max-height:420px;overflow-y:auto;margin-bottom:16px;padding-right:2px">
+      ${!jobs.length
+        ? '<div style="text-align:center;color:var(--text3);padding:32px;font-style:italic;font-family:var(--font-serif)">No jobs yet</div>'
+        : [...jobs].reverse().map(j=>jobHtml(j)).join('')}
+    </div>
+    <div class="modal-row">
+      <button class="mbtn" onclick="closeModal();setTimeout(showJobs,10)" style="margin-right:auto">&#8635; Refresh</button>
+      <button class="mbtn" onclick="closeModal()">Close</button>
+    </div>`;
+}
+
+
+// ═══════════════════════════════════════════
+// MKDIR / RENAME
+// ═══════════════════════════════════════════
+function showMkdir() {
+  const m = mkModal();
+  m.innerHTML = `<h2>New Folder</h2><p>Enter a name for the new folder.</p>
+    <input class="modal-input" id="mkdir-val" type="text" value="New Folder" autofocus>
+    <div class="modal-row"><button class="mbtn" onclick="closeModal()">Cancel</button><button class="mbtn ok" onclick="doMkdir()">Create</button></div>`;
+  setTimeout(()=>{const i=document.getElementById('mkdir-val');i&&i.select();},80);
+}
+async function doMkdir() {
+  const name = document.getElementById('mkdir-val').value.trim();
+  if (!name) return;
+  await fetch('/api/mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:curPath,name})});
+  closeModal(); reload(); toast('📁 Created','ok');
+}
+function showNewFile() {
+  const m = mkModal();
+  m.innerHTML = `<h2>New Text File</h2>
+    <label style="font-size:12px;color:var(--text3);display:block;margin-bottom:4px">File name</label>
+    <input class="modal-input" id="newfile-name" type="text" value="untitled.txt" autofocus>
+    <div class="modal-row"><button class="mbtn" onclick="closeModal()">Cancel</button><button class="mbtn ok" onclick="doNewFile()">Create &amp; Edit</button></div>`;
+  setTimeout(()=>{const i=document.getElementById('newfile-name');if(i){i.select();}},80);
+}
+async function doNewFile() {
+  const name = document.getElementById('newfile-name').value.trim();
+  if (!name) return;
+  const p = curPath.replace(/\/+$/,'') + '/' + name;
+  const ext = name.split('.').pop().toLowerCase();
+  const r = await fetch('/api/file/write',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p,content:''})});
+  if (!r.ok) { const d = await r.json(); toast('⚠ ' + (d.error||'Failed'), 'err'); return; }
+  closeModal(); reload(); toast('✓ Created: ' + name, 'ok');
+  if (EDITABLE_EXTS_UI.has(ext)) setTimeout(() => openEditor(p), 300);
+}
+function showRename(p, cur) {
+  const m = mkModal();
+  m.innerHTML = `<h2>Rename</h2><p>New name for "<strong>${esc(cur)}</strong>"</p>
+    <input class="modal-input" id="ren-val" type="text" value="${esc(cur)}" autofocus>
+    <div class="modal-row"><button class="mbtn" onclick="closeModal()">Cancel</button><button class="mbtn ok" onclick="doRename('${esc(p)}')">Rename</button></div>`;
+  setTimeout(()=>{const i=document.getElementById('ren-val');i&&i.select();},80);
+}
+async function doRename(p) {
+  const n = document.getElementById('ren-val').value.trim();
+  if (!n) return;
+  await fetch('/api/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({oldPath:p,newName:n})});
+  closeModal(); reload(); toast('✓ Renamed','ok');
+}
+
+// ═══════════════════════════════════════════
+// CONTEXT MENU
+// ═══════════════════════════════════════════
+function ctxMenu(ev, p, type) {
+  ev.preventDefault(); ev.stopPropagation();
+  if (!selected.has(p)) { selected.clear(); selected.add(p); lastSel=p; renderFiles(); selUI(); }
+  document.querySelectorAll('.ctxmenu').forEach(e=>e.remove());
+  const entry = filtered.find(x=>x.path===p);
+  const multi = selected.size > 1;
+  const m = document.createElement('div');
+  m.className = 'ctxmenu';
+
+  // Safe menu items using closures - no path string injection
+  const menuItems = [];
+  if (!multi && type==='directory') menuItems.push({icon:'📂', label:'Open',             fn:()=>dblItem(p,type)});
+  if (!multi && type==='file') {
+    const ext = p.split('.').pop().toLowerCase();
+    if (EDITABLE_EXTS_UI.has(ext)) {
+      menuItems.push({icon:'✏', label:'Edit',    fn:()=>openEditor(p)});
+    }
+    menuItems.push({icon:'👁', label:'Preview',  fn:()=>previewFile(p)},
+                   {icon:'↓', label:'Download',  fn:()=>dlFile(p)});
+  }
+  menuItems.push({sep:true});
+  menuItems.push({icon:'⎘', label:'Copy',          fn:()=>copySel()});
+  menuItems.push({icon:'✂', label:'Cut',           fn:()=>cutSel()});
+  if (clipboard) menuItems.push({icon:'⊞', label:'Paste here', fn:()=>doPaste()});
+  menuItems.push({sep:true});
+  if (!multi && entry) menuItems.push({icon:'✏', label:'Rename',     fn:()=>showRename(p, entry.name||'')});
+  menuItems.push({icon:'ℹ', label:'Properties',    fn:()=>showProps(p)});
+  menuItems.push({sep:true});
+  // ── Pin to Places (directories only) ────────────────────────
+  if (!multi && type === 'directory') {
+    menuItems.push({icon:'📌', label:'Pin to Places', fn:()=>pinToPlaces(p, entry ? entry.name : p.split('/').pop())});
+  }
+  // ── Zip / Unzip ───────────────────────────────────────────────
+  if (!multi) {
+    const ext = p.split('.').pop().toLowerCase();
+    if (ext === 'zip') {
+      menuItems.push({icon:'📦', label:'Unzip here', fn:()=>doUnzip(p)});
+    } else {
+      menuItems.push({icon:'🗜', label:'Zip…',        fn:()=>doZipSelected(p, type)});
+    }
+  } else {
+    menuItems.push({icon:'🗜', label:'Zip selected…',      fn:()=>doZipSelected(null, null)});
+    menuItems.push({icon:'↓', label:'Download selected…', fn:()=>dlMultiSel()});
+  }
+  // ── AI Actions ────────────────────────────────────────────────
+  if (!multi && entry) {
+    const isImg = IMAGE_EXTS_UI.has((entry.name.split('.').pop()||'').toLowerCase()) ||
+                  (entry.mime && entry.mime.startsWith('image/'));
+    if (isImg) {
+      menuItems.push({icon:'✦', label:'AI Describe Image', fn:()=>aiDescribeImage(p, entry.name)});
+    } else if (type === 'directory') {
+      menuItems.push({icon:'✦', label:'AI Task…',          fn:()=>showAITask(p)});
+      menuItems.push({icon:'✦', label:'AI Summarize',      fn:()=>aiSummarize(p, entry.name)});
+      menuItems.push({icon:'✦', label:'AI Suggest Name',   fn:()=>aiSuggestName(p, entry.name)});
+    } else {
+      menuItems.push({icon:'✦', label:'AI Summarize',      fn:()=>aiSummarize(p, entry.name)});
+      menuItems.push({icon:'✦', label:'AI Suggest Name',   fn:()=>aiSuggestName(p, entry.name)});
+      menuItems.push({icon:'✦', label:'AI Tag File',       fn:()=>aiTag(p, entry.name)});
+    }
+  }
+  menuItems.push({sep:true});
+  menuItems.push({icon:'🗑', label:'Move to Trash',      fn:()=>delSel(),  red:true});
+  menuItems.push({icon:'💀', label:'Delete Permanently', fn:()=>permDel(), red:true});
+
+  menuItems.forEach((item, idx) => {
+    if (item.sep) {
+      const sep = document.createElement('div'); sep.className='ctx-sep'; m.appendChild(sep);
+    } else {
+      const el = document.createElement('div');
+      el.className = 'ctx-item' + (item.red ? ' red' : '');
+      el.innerHTML = `<span class="ctx-ico">${item.icon}</span>${esc(item.label)}`;
+      el.addEventListener('click', () => {
+        m.remove();
+        document.removeEventListener('click', dismiss);
+        // Use 150ms delay — ensures the click event fully propagates and dismiss handler
+        // has already fired/cleared before item.fn() tries to open a new modal
+        setTimeout(() => item.fn(), 150);
+      });
+      m.appendChild(el);
+    }
+  });
+
+  const {innerWidth:W,innerHeight:H}=window;
+  let x=ev.clientX,y=ev.clientY;
+  document.body.appendChild(m);
+  const r=m.getBoundingClientRect();
+  if(x+r.width>W)x=W-r.width-8;
+  if(y+r.height>H)y=H-r.height-8;
+  m.style.left=x+'px'; m.style.top=y+'px';
+  const dismiss=e=>{if(!m.contains(e.target)){m.remove();document.removeEventListener('click',dismiss);}};
+  setTimeout(()=>document.addEventListener('click',dismiss),50);
+}
+
+// ═══════════════════════════════════════════
+// PREVIEW
+// ═══════════════════════════════════════════
+function previewFile(p) {
+  const e = filtered.find(x=>x.path===p);
+  if (!e) return;
+  const mime = e.mime||'', ext = e.name.split('.').pop().toLowerCase();
+  const m = mkModal();
+  if (mime.startsWith('image/')) {
+    m.innerHTML = `<h2>🖼 ${esc(e.name)}</h2><img src="/api/preview?path=${enc(p)}" style="max-width:100%;max-height:58vh;border-radius:8px;margin-bottom:16px;display:block"><div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button><button class="mbtn ok" onclick="dlFile('${esc(p)}')">↓ Download</button></div>`;
+  } else if (mime.startsWith('video/')) {
+    m.innerHTML = `<h2>🎬 ${esc(e.name)}</h2><video controls src="/api/preview?path=${enc(p)}" style="max-width:100%;max-height:58vh;border-radius:8px;margin-bottom:16px"></video><div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button></div>`;
+  } else if (mime.startsWith('text/')||['json','yaml','yml','toml','xml','sh','py','js','ts','md','log','conf','cfg','env','rs','go','rb'].includes(ext)) {
+    m.innerHTML = `<h2>📝 ${esc(e.name)}</h2><p>Loading…</p>`;
+    fetch(`/api/preview?path=${enc(p)}`).then(r=>r.text()).then(txt=>{
+      m.innerHTML = `<h2>📝 ${esc(e.name)}</h2><pre style="background:var(--surface2);border-radius:8px;padding:14px;overflow:auto;max-height:55vh;font-family:var(--font-mono);font-size:12px;color:var(--text2);border:1px solid var(--border);margin-bottom:16px;white-space:pre-wrap;line-height:1.5">${esc(txt.slice(0,80000))}</pre><div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button><button class="mbtn ok" onclick="dlFile('${esc(p)}')">↓ Download</button></div>`;
+    });
+  } else {
+    m.innerHTML = `<h2>📄 ${esc(e.name)}</h2><p>No preview available.<br><span style="font-family:var(--font-mono);font-size:12px;color:var(--text3)">${mime||'unknown type'} · ${fmtSize(e.size)}</span></p><div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button><button class="mbtn ok" onclick="dlFile('${esc(p)}')">↓ Download</button></div>`;
+  }
+}
+function showProps(p) {
+  const e = filtered.find(x => x.path === p);
+  if (!e) { toast('Item not found in current view', 'err'); return; }
+
+  const isDir = e.type === 'directory';
+  const icon = isDir
+    ? `<div style="text-align:center;font-size:44px;margin-bottom:14px">&#128193;</div>`
+    : (e.mime && e.mime.startsWith('image/')
+        ? `<img src="/api/preview?path=${enc(p)}" style="max-width:100%;max-height:130px;object-fit:contain;border-radius:8px;display:block;margin:0 auto 14px" onerror="this.style.display='none'">`
+        : `<div style="text-align:center;font-size:44px;margin-bottom:14px">${fileIcon(e)}</div>`);
+
+  const m = mkModal();
+
+  function renderTable(sizeVal) {
+    const rows = [
+      ['Name',        esc(e.name)],
+      ['Path',        esc(e.path)],
+      ['Type',        esc(isDir ? 'Directory' : (e.mime || 'File'))],
+      ['Size',        sizeVal],
+      ['Modified',    esc(fmtDate(e.modified))],
+      ['Permissions', esc(e.permissions || '—')],
+    ];
+    return rows.map(([k,v]) => `<tr>
+      <td style="color:var(--text3);padding:7px 0;width:100px;vertical-align:top;font-family:var(--font-sans);font-size:12px">${k}</td>
+      <td style="color:var(--text);padding:7px 0;font-family:var(--font-mono);font-size:11.5px;word-break:break-all" id="prop-${k.toLowerCase()}">${v}</td>
+    </tr>`).join('');
+  }
+
+  const initialSize = isDir
+    ? `<span id="prop-dirsize-val" style="color:var(--text3);font-style:italic">Calculating…</span>`
+    : esc(fmtSize(e.size));
+
+  m.innerHTML = `<h2>&#8505; Properties</h2>
+    <div style="background:var(--surface2);border-radius:10px;padding:16px;border:1px solid var(--border);margin-bottom:16px">
+      ${icon}
+      <table style="width:100%;border-collapse:collapse;font-size:13px">
+        ${renderTable(initialSize)}
+      </table>
+    </div>
+    <div class="modal-row">
+      <button class="mbtn" onclick="closeModal()">Close</button>
+      ${!isDir ? `<button class="mbtn ok" onclick="dlFile('${esc(p)}')">&#8595; Download</button>` : ''}
+    </div>`;
+
+  // For directories: stream size via SSE — no blocking, updates live
+  if (isDir) {
+    const evtSrc = new EventSource(`/api/dirsize?path=${enc(p)}`);
+    let done = false;
+    evtSrc.onmessage = ev => {
+      try {
+        const d = JSON.parse(ev.data);
+        const el = document.getElementById('prop-dirsize-val');
+        if (!el) { evtSrc.close(); return; }
+        if (d.done) {
+          done = true;
+          evtSrc.close();
+          const sizeStr = fmtSize(d.size || 0);
+          const fileStr = d.files ? ` (${d.files.toLocaleString()} files)` : '';
+          const note    = d.partial ? ' ~' : '';
+          el.textContent = note + sizeStr + fileStr;
+          el.style.cssText = d.partial ? 'color:var(--text2);font-style:italic' : '';
+        } else if (d.error) {
+          done = true;
+          evtSrc.close();
+          el.textContent = 'Permission denied';
+          el.style.color = 'var(--text3)';
+          el.style.fontStyle = 'italic';
+        }
+      } catch {}
+    };
+    evtSrc.onerror = () => {
+      // SSE errors usually mean the stream closed cleanly after sending data,
+      // or a transient reconnect. Only show a message if we truly got no data.
+      evtSrc.close();
+      if (!done) {
+        const el = document.getElementById('prop-dirsize-val');
+        if (el && (el.textContent === 'Calculating…' || el.textContent === '')) {
+          el.textContent = 'Unavailable';
+          el.style.color = 'var(--text3)';
+          el.style.fontStyle = 'italic';
+        }
+      }
+    };
+    // Clean up if modal closed before stream finishes
+    const obs = new MutationObserver(() => {
+      if (!document.getElementById('prop-dirsize-val')) { evtSrc.close(); obs.disconnect(); }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+  }
+}
+function dlFile(p) { window.location.href = `/api/download?path=${enc(p)}`; }
+
+async function dlMultiSel() {
+  const sel = [...selected];
+  if (!sel.length) return;
+  // Single item — direct download
+  if (sel.length === 1) { dlFile(sel[0]); return; }
+  // Multiple items — zip on server then download
+  const zipName  = `download-${Date.now()}.zip`;
+  const destPath = curPath.replace(/\/+$/, '') + '/' + zipName;
+  toast(`⏳ Preparing zip of ${sel.length} items…`, 'ok');
+  try {
+    const r = await fetch('/api/zip', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sources: sel, destination: destPath, clientId: wsId })
+    });
+    const d = await r.json();
+    if (!d.jobId) { toast('Failed to start zip', 'err'); return; }
+    // Poll until done
+    await new Promise((resolve, reject) => {
+      const poll = setInterval(async () => {
+        try {
+          const jr = await fetch('/api/jobs');
+          const jd = await jr.json();
+          const job = (jd.jobs || []).find(j => j.jobId === d.jobId);
+          if (!job) { clearInterval(poll); reject(new Error('Job lost')); return; }
+          if (job.status === 'done') { clearInterval(poll); resolve(); }
+          else if (job.status === 'error' || job.status === 'cancelled') {
+            clearInterval(poll); reject(new Error(job.error || 'Zip failed'));
+          }
+        } catch (e) { clearInterval(poll); reject(e); }
+      }, 500);
+    });
+    window.location.href = `/api/download?path=${enc(destPath)}`;
+    // Clean up temp zip after browser starts download
+    setTimeout(async () => {
+      try {
+        await fetch('/api/delete-permanent', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ paths: [destPath] })
+        });
+      } catch {}
+      reload();
+    }, 4000);
+  } catch(e) {
+    toast('Download failed: ' + e.message, 'err');
+  }
+}
+
+// ═══════════════════════════════════════════
+// FILE EDITOR
+// ═══════════════════════════════════════════
+let editorState = null; // { path, content, dirty, savedContent }
+
+async function openEditor(p) {
+  const name = p.split('/').pop();
+  const m = mkModal();
+  m.classList.add('editor-modal');
+
+  m.innerHTML = `
+    <div class="editor-wrap">
+      <div class="editor-toolbar">
+        <span class="editor-filename" id="ed-name" title="${esc(p)}">${esc(name)}</span>
+        <span class="editor-status" id="ed-status">Loading…</span>
+        <button class="mbtn" style="padding:4px 12px;font-size:12px" onclick="closeModal();editorState=null">✕ Close</button>
+        <button class="mbtn ok" style="padding:4px 14px;font-size:12px" id="ed-save" onclick="saveEditor()" disabled>Save</button>
+      </div>
+      <textarea class="editor-textarea" id="ed-area" spellcheck="false" placeholder="Loading…"></textarea>
+      <div class="editor-footer">
+        <span style="font-size:11px;color:var(--text3);font-family:var(--font-mono)" id="ed-info">—</span>
+        <div style="display:flex;gap:8px">
+          <span style="font-size:11px;color:var(--text3)">Ctrl+S to save · Ctrl+Z undo</span>
+        </div>
+      </div>
+    </div>`;
+
+  try {
+    const r = await fetch(`/api/file/read?path=${enc(p)}`);
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Cannot read file');
+
+    editorState = { path: p, content: d.content, dirty: false, savedContent: d.content };
+
+    const ta = document.getElementById('ed-area');
+    ta.value = d.content;
+
+    const lines = d.content.split('
+').length;
+    const info  = document.getElementById('ed-info');
+    if (info) info.textContent = `${lines.toLocaleString()} lines · ${fmtSize(d.size)}`;
+
+    const status = document.getElementById('ed-status');
+    if (status) { status.textContent = 'Ready'; status.style.color = 'var(--green)'; }
+
+    const saveBtn = document.getElementById('ed-save');
+
+    ta.addEventListener('input', () => {
+      if (!editorState) return;
+      const wasDirty = editorState.dirty;
+      editorState.content = ta.value;
+      editorState.dirty   = ta.value !== editorState.savedContent;
+      if (editorState.dirty !== wasDirty) {
+        const fnEl = document.getElementById('ed-name');
+        if (fnEl) {
+          fnEl.textContent = editorState.dirty ? name + ' ●' : name;
+          fnEl.style.color = editorState.dirty ? 'var(--accent2)' : '';
+        }
+        if (saveBtn) saveBtn.disabled = !editorState.dirty;
+      }
+      // Update line count
+      const l = ta.value.split('
+').length;
+      if (info) info.textContent = `${l.toLocaleString()} lines · ${fmtSize(new Blob([ta.value]).size)}`;
+    });
+
+    ta.addEventListener('keydown', e => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveEditor(); }
+      // Tab inserts spaces instead of focusing next element
+      if (e.key === 'Tab') {
+        e.preventDefault();
+        const start = ta.selectionStart, end = ta.selectionEnd;
+        ta.value = ta.value.slice(0, start) + '  ' + ta.value.slice(end);
+        ta.selectionStart = ta.selectionEnd = start + 2;
+        ta.dispatchEvent(new Event('input'));
+      }
+    });
+
+    ta.focus();
+  } catch(e) {
+    m.innerHTML = `<div style="padding:24px"><h2>✏ Editor</h2><p style="color:var(--red);margin-top:12px">Error: ${esc(e.message)}</p>
+      <div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button></div></div>`;
+  }
+}
+
+async function saveEditor() {
+  if (!editorState || !editorState.dirty) return;
+  const saveBtn = document.getElementById('ed-save');
+  const status  = document.getElementById('ed-status');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
+  if (status)  { status.textContent = 'Saving…'; status.style.color = 'var(--yellow)'; }
+  try {
+    const r = await fetch('/api/file/write', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ path: editorState.path, content: editorState.content })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Save failed');
+    editorState.savedContent = editorState.content;
+    editorState.dirty = false;
+    const fnEl = document.getElementById('ed-name');
+    const name = editorState.path.split('/').pop();
+    if (fnEl) { fnEl.textContent = name; fnEl.style.color = ''; }
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Save'; }
+    if (status)  { status.textContent = `Saved ${fmtSize(d.size)}`; status.style.color = 'var(--green)'; }
+    toast(`✓ Saved: ${name}`, 'ok');
+    reload();
+  } catch(e) {
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save'; }
+    if (status)  { status.textContent = 'Save failed'; status.style.color = 'var(--red)'; }
+    toast('Save failed: ' + e.message, 'err');
+  }
+}
+
+// ═══════════════════════════════════════════
+// ZIP / UNZIP
+// ═══════════════════════════════════════════
+async function doZipSelected(singlePath, singleType) {
+  // Collect what to zip: multi-selection or single item
+  const items = selected.size > 0
+    ? [...selected]
+    : singlePath ? [singlePath] : [];
+  if (!items.length) { toast('Nothing selected', 'warn'); return; }
+
+  const defaultName = items.length === 1
+    ? items[0].split('/').pop().replace(/\.\w+$/, '') + '.zip'
+    : 'archive.zip';
+
+  const m = mkModal();
+  m.innerHTML = `<h2>🗜 Create Zip Archive</h2>
+    <p style="color:var(--text3);font-size:12px;margin-bottom:8px">${items.length} item(s) selected</p>
+    <label style="font-size:12px;color:var(--text3);display:block;margin-bottom:4px">Archive name</label>
+    <input class="modal-input" id="zip-name" type="text" value="${esc(defaultName)}" autofocus>
+    <label style="font-size:12px;color:var(--text3);display:block;margin:10px 0 4px">Save to folder</label>
+    <input class="modal-input" id="zip-dest" type="text" value="${esc(curPath)}" placeholder="/path/to/folder">
+    <div class="modal-row">
+      <button class="mbtn" onclick="closeModal()">Cancel</button>
+      <button class="mbtn ok" onclick="startZip(${JSON.stringify(items).replace(/"/g,'&quot;')})">🗜 Create</button>
+    </div>`;
+  setTimeout(() => { const i = document.getElementById('zip-name'); if(i){i.focus();i.select();} }, 80);
+}
+
+async function startZip(items) {
+  const nameEl = document.getElementById('zip-name');
+  const destEl = document.getElementById('zip-dest');
+  if (!nameEl || !destEl) return;
+  const zipName = nameEl.value.trim().replace(/[<>:"\/|?*]/g,'_') || 'archive.zip';
+  const destDir = destEl.value.trim() || curPath;
+  const destination = destDir.replace(/\/+$/, '') + '/' + (zipName.endsWith('.zip') ? zipName : zipName + '.zip');
+  closeModal();
+
+  try {
+    const r = await fetch('/api/zip', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sources: items, destination, clientId: wsId })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Failed');
+    activeJobs.set(d.jobId, { jobId: d.jobId, status: 'running', percent: 0, phase: 'zipping', type: 'zip' });
+    showProgressPanel(`Creating ${zipName}…`);
+    updateJobsBadge();
+    toast(`🗜 Zipping ${items.length} item(s)…`, 'ok');
+  } catch(e) { toast('Zip failed: ' + e.message, 'err'); }
+}
+
+async function doUnzip(p) {
+  const name    = p.split('/').pop();
+  const destDir = p.substring(0, p.lastIndexOf('/')) || curPath;
+
+  const m = mkModal();
+  m.innerHTML = `<h2>📦 Extract Zip</h2>
+    <p style="color:var(--text3);font-size:12px;margin-bottom:8px">File: <span style="font-family:var(--font-mono);color:var(--text2)">${esc(name)}</span></p>
+    <label style="font-size:12px;color:var(--text3);display:block;margin-bottom:4px">Extract to folder</label>
+    <input class="modal-input" id="unzip-dest" type="text" value="${esc(destDir)}" autofocus>
+    <div class="modal-row">
+      <button class="mbtn" onclick="closeModal()">Cancel</button>
+      <button class="mbtn ok" onclick="startUnzip('${esc(p)}')">📦 Extract</button>
+    </div>`;
+  setTimeout(() => { const i = document.getElementById('unzip-dest'); if(i) i.focus(); }, 80);
+}
+
+async function startUnzip(p) {
+  const destEl = document.getElementById('unzip-dest');
+  const destination = destEl ? destEl.value.trim() : null;
+  closeModal();
+  const name = p.split('/').pop();
+  try {
+    const r = await fetch('/api/unzip', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ path: p, destination, clientId: wsId })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Failed');
+    activeJobs.set(d.jobId, { jobId: d.jobId, status: 'running', percent: 0, phase: 'extracting', type: 'unzip' });
+    showProgressPanel(`Extracting ${name}…`);
+    updateJobsBadge();
+    toast(`📦 Extracting ${name}…`, 'ok');
+  } catch(e) { toast('Unzip failed: ' + e.message, 'err'); }
+}
+
+// ═══════════════════════════════════════════
+// OLLAMA AI ACTIONS
+// ═══════════════════════════════════════════
+// ═══════════════════════════════════════════
+// PINNED PLACES
+// ═══════════════════════════════════════════
+function loadPinned() {
+  try { return JSON.parse(localStorage.getItem('nova_pinned') || '[]'); }
+  catch { return []; }
+}
+function savePinned(pins) {
+  localStorage.setItem('nova_pinned', JSON.stringify(pins));
+}
+function renderPinnedPlaces() {
+  const pins = loadPinned();
+  const sec  = document.getElementById('pinned-section');
+  const div  = document.getElementById('pinned-list');
+  const divider = document.getElementById('pinned-divider');
+  if (!sec || !div) return;
+  sec.style.display   = pins.length ? '' : 'none';
+  if (divider) divider.style.display = pins.length ? '' : 'none';
+  div.innerHTML = pins.map((pin, i) =>
+    `<div class="sb-item" data-path="${esc(pin.path)}" onclick="nav('${esc(pin.path)}')" style="display:flex;justify-content:space-between;align-items:center;padding-right:4px">
+      <span style="display:flex;align-items:center;gap:6px;overflow:hidden">
+        <span class="sb-icon">📁</span>
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(pin.name)}</span>
+      </span>
+      <span onclick="event.stopPropagation();unpinPlace(${i})" title="Remove" style="color:var(--text3);font-size:14px;padding:2px 4px;border-radius:3px;cursor:pointer;flex-shrink:0;line-height:1" onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--text3)'">×</span>
+    </div>`
+  ).join('');
+  sidebarActive();
+}
+function pinToPlaces(p, name) {
+  const pins = loadPinned();
+  if (pins.find(x => x.path === p)) { toast('Already pinned', 'warn'); return; }
+  pins.push({ path: p, name: name || p.split('/').pop() || p });
+  savePinned(pins);
+  renderPinnedPlaces();
+  toast(`📌 Pinned: ${name}`, 'ok');
+}
+function unpinPlace(idx) {
+  const pins = loadPinned();
+  const name = pins[idx]?.name || '';
+  pins.splice(idx, 1);
+  savePinned(pins);
+  renderPinnedPlaces();
+  toast(`Unpinned: ${name}`, 'ok');
+}
+
+function aiLoading(title, filename) {
+  const m = mkModal();
+  m.innerHTML = `<h2>${title}</h2>
+    <p style="color:var(--text2);font-size:13px;margin-bottom:8px">${esc(filename)}</p>
+    <div style="display:flex;align-items:center;gap:10px;padding:18px 0;color:var(--text3)">
+      <div class="spinner"></div>
+      <span id="ai-status">Asking Ollama…</span>
+    </div>`;
+  return m;
+}
+
+async function aiSummarize(p, name) {
+  const m = aiLoading('✦ AI Summary', name);
+  try {
+    const r  = await fetch('/api/ollama/summarize', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ path: p })
+    });
+    const d = await r.json();
+    // Server says it's an image — auto-switch to describe-image
+    if (!r.ok && d.isImage) { return aiDescribeImage(p, name); }
+    if (!r.ok) throw new Error(d.error || 'Failed');
+    const ext = name.split('.').pop().toLowerCase();
+    const badge = ext === 'pdf' ? '📄 PDF' : ext === 'dir' ? '📁 Directory' : '📝 Text';
+    m.innerHTML = `<h2>✦ AI Summary</h2>
+      <p style="color:var(--text3);font-size:12px;margin-bottom:12px;font-family:var(--font-mono)">${esc(name)} <span style="background:var(--surface3);border-radius:4px;padding:2px 6px;font-size:10px">${badge}</span></p>
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:13px;line-height:1.6;color:var(--text);margin-bottom:16px">${esc(d.summary)}</div>
+      <div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button></div>`;
+  } catch(e) {
+    m.innerHTML = `<h2>✦ AI Summary</h2><p style="color:var(--red)">Error: ${esc(e.message)}</p>
+      <div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button></div>`;
+  }
+}
+
+async function aiSuggestName(p, name) {
+  const m = aiLoading('✦ AI Rename Suggestion', name);
+  try {
+    const r = await fetch('/api/ollama/suggest-name', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ path: p })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Failed');
+    m.innerHTML = `<h2>✦ AI Rename Suggestion</h2>
+      <p style="color:var(--text3);font-size:12px;margin-bottom:12px">From: <span style="font-family:var(--font-mono)">${esc(name)}</span></p>
+      <div style="background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:14px;font-family:var(--font-mono);font-size:14px;color:var(--accent2);margin-bottom:16px">${esc(d.name)}</div>
+      <div class="modal-row">
+        <button class="mbtn" onclick="closeModal()">Cancel</button>
+        <button class="mbtn ok" onclick="applyAIRename('${esc(p)}','${esc(d.name)}')">Apply Rename</button>
+      </div>`;
+  } catch(e) {
+    m.innerHTML = `<h2>✦ AI Rename</h2><p style="color:var(--red)">Error: ${esc(e.message)}</p>
+      <div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button></div>`;
+  }
+}
+
+async function applyAIRename(p, newName) {
+  closeModal();
+  const r = await fetch('/api/rename', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ oldPath: p, newName })
+  });
+  if (r.ok) { reload(); toast('✦ Renamed by AI: ' + newName, 'ok'); }
+  else { toast('Rename failed', 'err'); }
+}
+
+async function aiTag(p, name) {
+  const m = aiLoading('✦ AI Tags', name);
+  try {
+    const r = await fetch('/api/ollama/tag', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ path: p })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Failed');
+    const tagHtml = d.tags.map(t =>
+      `<span style="display:inline-block;background:var(--accentbg);border:1px solid var(--accent);color:var(--accent2);border-radius:4px;padding:3px 10px;font-size:12px;font-family:var(--font-mono);margin:3px">${esc(t)}</span>`
+    ).join('');
+    m.innerHTML = `<h2>✦ AI Tags</h2>
+      <p style="color:var(--text3);font-size:12px;margin-bottom:14px;font-family:var(--font-mono)">${esc(name)}</p>
+      <div style="margin-bottom:16px">${tagHtml}</div>
+      <div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button></div>`;
+  } catch(e) {
+    m.innerHTML = `<h2>✦ AI Tags</h2><p style="color:var(--red)">Error: ${esc(e.message)}</p>
+      <div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button></div>`;
+  }
+}
+
+async function aiDescribeImage(p, name) {
+  const m = aiLoading('✦ AI Image Description', name);
+  try {
+    const r = await fetch('/api/ollama/describe-image', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ path: p })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Failed');
+    m.innerHTML = `<h2>✦ AI Image Description</h2>
+      <img src="/api/preview?path=${enc(p)}" style="max-width:100%;max-height:140px;object-fit:contain;border-radius:8px;display:block;margin:0 auto 14px">
+      <div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:13px;line-height:1.6;color:var(--text);margin-bottom:16px">${esc(d.description)}</div>
+      <div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button></div>`;
+  } catch(e) {
+    m.innerHTML = `<h2>✦ AI Image</h2><p style="color:var(--red)">Error: ${esc(e.message)}</p>
+      <div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button></div>`;
+  }
+}
+
+// ── AI Agent (plan + execute file operations) ─────────────────
+async function aiAgentPlan(dir, instruction) {
+  const r = await fetch('/api/ollama/agent-plan', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ dir, prompt: instruction })
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || 'AI planning failed');
+  return d.plan || d;
+}
+async function aiAgentRun(plan) {
+  const r = await fetch('/api/ollama/agent-run', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ plan })
+  });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || 'Execution failed');
+  return d;
+}
+function formatAgentOps(ops) {
+  if (!ops || !ops.length) return '<p style="color:var(--text3);font-size:13px">No file operations suggested.</p>';
+  return `<div style="max-height:260px;overflow-y:auto;margin-bottom:14px">
+    ${ops.map(op => {
+      if (op.op === 'mkdir') return `<div style="padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);font-size:12px;margin-bottom:4px"><span style="color:var(--green);font-family:var(--font-mono)">mkdir</span><span style="font-family:var(--font-mono);color:var(--text2);margin-left:6px">${esc(op.path||'')}</span></div>`;
+      if (op.op === 'move') return `<div style="padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);font-size:12px;margin-bottom:4px"><span style="color:var(--accent2);font-family:var(--font-mono)">move</span><span style="font-family:var(--font-mono);color:var(--text2);margin-left:6px">${esc(op.from||'')}</span><span style="color:var(--text3);margin:0 4px">→</span><span style="font-family:var(--font-mono);color:var(--text2)">${esc(op.to||'')}</span></div>`;
+      if (op.op === 'move_filter') return `<div style="padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);font-size:12px;margin-bottom:4px"><span style="color:var(--blue,#5b9bd5);font-family:var(--font-mono)">move_filter</span><span style="font-family:var(--font-mono);color:var(--text2);margin-left:6px">${esc(op.filter||'')}</span><span style="color:var(--text3);margin:0 6px">in</span><span style="font-family:var(--font-mono);color:var(--text2)">${esc(op.dir||'')}</span><span style="color:var(--text3);margin:0 4px">→</span><span style="font-family:var(--font-mono);color:var(--text2)">${esc(op.target||'')}</span></div>`;
+      return `<div style="padding:6px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);font-size:12px;margin-bottom:4px"><span style="font-family:var(--font-mono);color:var(--text3)">${esc(op.op||'unknown')}</span></div>`;
+    }).join('')}
+  </div>`;
+}
+function showAITask(initialDir) {
+  const dir = initialDir || curPath;
+  const m = mkModal();
+  m.innerHTML = `<h2>✦ AI Task</h2>
+    <p style="color:var(--text3);font-size:12px;margin-bottom:8px">
+      Describe what you want done <strong>inside</strong> this folder:<br>
+      <span style="font-family:var(--font-mono);color:var(--accent2)">${esc(dir)}</span>
+    </p>
+    <textarea id="ai-task-input" class="modal-input" style="min-height:80px;resize:vertical" placeholder="e.g. Move all folders into a new folder named archive"></textarea>
+    <p style="color:var(--text3);font-size:11px;margin-top:2px;margin-bottom:10px">
+      Supported: create folders, move items, filtered moves. AI proposes a plan first — you confirm before it runs.
+    </p>
+    <div id="ai-task-plan" style="font-size:12px;color:var(--text3);margin-bottom:10px;display:none"></div>
+    <div class="modal-row">
+      <button class="mbtn" onclick="closeModal()">Close</button>
+      <button class="mbtn" id="ai-task-plan-btn">Ask AI</button>
+      <button class="mbtn ok" id="ai-task-run-btn" disabled>Run Plan</button>
+    </div>`;
+  setTimeout(() => { const i = document.getElementById('ai-task-input'); if (i) i.focus(); }, 60);
+  let latestPlan = null;
+  const planDiv = m.querySelector('#ai-task-plan');
+  const planBtn = m.querySelector('#ai-task-plan-btn');
+  const runBtn  = m.querySelector('#ai-task-run-btn');
+  if (!planBtn || !runBtn) return;
+  planBtn.addEventListener('click', async () => {
+    const text = (document.getElementById('ai-task-input') || {}).value?.trim() || '';
+    if (!text) return;
+    latestPlan = null;
+    planDiv.style.display = '';
+    planDiv.innerHTML = `<div style="display:flex;align-items:center;gap:8px;color:var(--text3);padding:6px 0"><div class="spinner" style="width:14px;height:14px;border-width:2px"></div><span>Thinking about safe file operations…</span></div>`;
+    runBtn.disabled = true; planBtn.disabled = true;
+    try {
+      const plan = await aiAgentPlan(dir, text);
+      const ops  = Array.isArray(plan.operations) ? plan.operations : [];
+      latestPlan = { operations: ops };
+      planDiv.innerHTML = ops.length
+        ? `<p style="color:var(--text2);font-size:12px;margin-bottom:6px">Planned operations:</p>${formatAgentOps(ops)}`
+        : '<p style="color:var(--text3);font-size:13px">AI found no safe file operations for that request.</p>';
+      runBtn.disabled = !ops.length;
+    } catch (e) {
+      planDiv.innerHTML = `<p style="color:var(--red);font-size:13px">Error: ${esc(e.message)}</p>`;
+      runBtn.disabled = true;
+    } finally { planBtn.disabled = false; }
+  });
+  runBtn.addEventListener('click', async () => {
+    if (!latestPlan?.operations?.length) return;
+    runBtn.disabled = true; planBtn.disabled = true;
+    planDiv.innerHTML += `<p style="color:var(--text3);font-size:12px;margin-top:6px">Running plan…</p>`;
+    try {
+      const res  = await aiAgentRun(latestPlan);
+      const errs = (res.results || []).filter(r => r.status !== 'ok');
+      if (errs.length) planDiv.innerHTML += `<p style="color:var(--red);font-size:12px;margin-top:4px">Some operations failed: ${errs.length}</p>`;
+      closeModal(); reload();
+      toast('✦ AI task completed', errs.length ? 'warn' : 'ok');
+    } catch (e) {
+      planDiv.innerHTML += `<p style="color:var(--red);font-size:12px;margin-top:4px">Run failed: ${esc(e.message)}</p>`;
+      runBtn.disabled = false; planBtn.disabled = false;
+    }
+  });
+}
+
+function showAIModels() {
+  const m = mkModal();
+  m.innerHTML = `<h2>✦ AI Models</h2>
+    <p style="color:var(--text3);font-size:12px;margin-bottom:14px">Models extend which file types Nova AI can analyze. Run these commands on your Ollama host.</p>
+    <div id="models-list" style="max-height:340px;overflow-y:auto;margin-bottom:14px">
+      <div style="color:var(--text3);font-size:12px;padding:10px 0">Loading…</div>
+    </div>
+    <div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button></div>`;
+
+  fetch('/api/ollama/suggest-models').then(r => r.json()).then(d => {
+    const el = document.getElementById('models-list');
+    if (!el) return;
+    el.innerHTML = d.suggestions.map(s => `
+      <div style="background:var(--surface2);border:1px solid var(${s.installed ? '--green' : '--border'});border-radius:8px;padding:12px 14px;margin-bottom:8px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <span style="font-family:var(--font-mono);font-size:13px;color:var(--text)">${esc(s.model)}</span>
+          <span style="font-size:11px;padding:2px 8px;border-radius:4px;background:var(${s.installed ? '--green' : '--surface3'});color:var(${s.installed ? '--bg' : '--text3'})">${s.installed ? '✓ installed' : s.size}</span>
+        </div>
+        <div style="font-size:12px;color:var(--text2);margin-bottom:6px">${esc(s.use)}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:${s.installed ? '0' : '8px'}">
+          ${s.types.map(t => `<span style="font-size:10px;background:var(--surface3);border-radius:3px;padding:2px 6px;color:var(--text3);font-family:var(--font-mono)">${esc(t)}</span>`).join('')}
+        </div>
+        ${!s.installed ? `<code style="font-size:11px;background:var(--surface3);border-radius:4px;padding:4px 8px;display:block;color:var(--accent2);font-family:var(--font-mono);user-select:all">${esc(s.pullCmd)}</code>` : ''}
+      </div>`).join('');
+  }).catch(() => {
+    const el = document.getElementById('models-list');
+    if (el) el.innerHTML = '<p style="color:var(--red)">Could not reach Ollama</p>';
+  });
+}
+
+function showAISearch() {
+  const m = mkModal();
+  m.innerHTML = `<h2>✦ AI Semantic Search</h2>
+    <p style="color:var(--text3);font-size:12px;margin-bottom:12px">
+      Searches text files in the current folder by meaning, not just filename.<br>
+      Uses <span style="font-family:var(--font-mono);color:var(--accent2)">nomic-embed-text</span> — fast, local, no internet.
+    </p>
+    <input class="modal-input" id="ai-q" type="text" placeholder="e.g. invoice with 90-day payment terms" autofocus>
+    <p style="color:var(--text3);font-size:11px;margin-top:6px;margin-bottom:4px">Tip: also type <span style="font-family:var(--font-mono);color:var(--accent2)">?your query</span> in the search box and press Enter.</p>
+    <div class="modal-row">
+      <button class="mbtn" onclick="closeModal();showAIModels()">Models…</button>
+      <button class="mbtn" onclick="closeModal()">Cancel</button>
+      <button class="mbtn ok" onclick="closeModal();aiSemanticSearch(document.getElementById('ai-q').value)">Search</button>
+    </div>`;
+  setTimeout(() => { const i = document.getElementById('ai-q'); if(i) i.focus(); }, 80);
+}
+
+async function aiSemanticSearch(query) {
+  if (!query.trim()) return;
+  const m = mkModal();
+  m.innerHTML = `<h2>✦ Semantic Search</h2>
+    <p style="color:var(--text3);font-size:13px;margin-bottom:8px">Searching in: <span style="font-family:var(--font-mono)">${esc(curPath)}</span></p>
+    <div style="display:flex;align-items:center;gap:10px;padding:18px 0;color:var(--text3)">
+      <div class="spinner"></div><span>Embedding and scoring files…</span>
+    </div>`;
+  try {
+    const r = await fetch('/api/ollama/search', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ query, dir: curPath })
+    });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.error || 'Search failed');
+    if (!d.results.length) {
+      m.innerHTML = `<h2>✦ Semantic Search</h2><p style="color:var(--text3)">No matching text files found in this folder.</p>
+        <div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button></div>`;
+      return;
+    }
+    const rows = d.results.map(r =>
+      `<div onclick="closeModal();dblItem('${r.path}','file')" style="display:flex;justify-content:space-between;align-items:center;padding:9px 12px;border-radius:6px;cursor:pointer;background:var(--surface3);margin-bottom:5px;border:1px solid var(--border);transition:background 0.1s" onmouseover="this.style.background='var(--surface4)'" onmouseout="this.style.background='var(--surface3)'">
+        <span style="font-family:var(--font-mono);font-size:12px;color:var(--text)">${esc(r.name)}</span>
+        <span style="font-size:11px;color:var(--accent2);font-family:var(--font-mono)">${Math.round(r.score*100)}%</span>
+      </div>`
+    ).join('');
+    m.innerHTML = `<h2>✦ Semantic Search</h2>
+      <p style="color:var(--text3);font-size:12px;margin-bottom:12px">Query: <em style="color:var(--text2)">${esc(query)}</em></p>
+      <div style="max-height:340px;overflow-y:auto;margin-bottom:14px">${rows}</div>
+      <div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button></div>`;
+  } catch(e) {
+    m.innerHTML = `<h2>✦ Semantic Search</h2><p style="color:var(--red)">Error: ${esc(e.message)}</p>
+      <div class="modal-row"><button class="mbtn" onclick="closeModal()">Close</button></div>`;
+  }
+}
+
+// ═══════════════════════════════════════════
+// UPLOAD
+// ═══════════════════════════════════════════
+function showUpload() { document.getElementById('file-input').click(); }
+async function uploadFiles(files) {
+  if (!files||!files.length) return;
+  const fd = new FormData();
+  for (const f of files) fd.append('files', f);
+  fd.append('path', curPath);
+  fd.append('clientId', wsId);
+  showProgressPanel(`Uploading ${files.length} file(s)…`);
+  document.getElementById('file-input').value = '';
+  // Track upload progress with XHR, but the server saves files in a background
+  // job — so even if the browser closes AFTER the HTTP request lands, files are safe.
+  const xhr = new XMLHttpRequest();
+  xhr.open('POST', '/api/upload');
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) updatePP(Math.round(e.loaded / e.total * 100), 'uploading');
+  };
+  xhr.onload = () => {
+    try {
+      const d = JSON.parse(xhr.responseText);
+      if (d.jobId) {
+        activeJobs.set(d.jobId, { jobId: d.jobId, status: 'running', percent: 0, phase: 'saving', type: 'upload' });
+        updateJobsBadge();
+        toast(`↑ Upload received — saving ${files.length} file(s)…`, 'ok');
+      } else {
+        closeProgress(); toast(`✓ ${files.length} file(s) uploaded`, 'ok');
+      }
+      reload();
+    } catch { closeProgress(); toast(`✓ ${files.length} file(s) uploaded`, 'ok'); reload(); }
+  };
+  xhr.onerror = () => { closeProgress(); toast('Upload failed', 'err'); };
+  xhr.send(fd);
+}
+
+// ═══════════════════════════════════════════
+// DRAG & DROP
+// ═══════════════════════════════════════════
+function onDragOver(ev) { ev.preventDefault(); document.getElementById('file-area').classList.add('dragover'); }
+function onDragLeave(ev) { document.getElementById('file-area').classList.remove('dragover'); }
+function onDrop(ev) { ev.preventDefault(); document.getElementById('file-area').classList.remove('dragover'); if(ev.dataTransfer.files.length) uploadFiles(ev.dataTransfer.files); }
+
+// ═══════════════════════════════════════════
+// PROGRESS PANEL
+// ═══════════════════════════════════════════
+function showProgressPanel(label) {
+  const pp = document.getElementById('progress-panel');
+  pp.style.display = '';
+  document.getElementById('pp-label').textContent = label;
+  document.getElementById('pp-spin').style.display = '';
+  document.getElementById('pp-bar').style.width = '0%';
+  document.getElementById('pp-pct').textContent = '0%';
+  document.getElementById('pp-file').textContent = 'Running on server — safe to close browser';
+  document.getElementById('pp-phase').textContent = 'Starting';
+  document.getElementById('pp-phase').className = 'phase-pill phase-starting';
+  // Reset cancel button state for new job
+  const cancelBtn = document.getElementById('pp-cancel-btn');
+  if (cancelBtn) { cancelBtn.textContent = 'Cancel'; cancelBtn.disabled = false; cancelBtn.style.display = 'none'; }
+}
+let _activeCancelJobId = null;
+
+function showCancelBtn(jobId) {
+  _activeCancelJobId = jobId;
+  const btn = document.getElementById('pp-cancel-btn');
+  if (btn) btn.style.display = '';
+}
+function hideCancelBtn() {
+  _activeCancelJobId = null;
+  const btn = document.getElementById('pp-cancel-btn');
+  if (btn) btn.style.display = 'none';
+}
+async function cancelActiveJob() {
+  if (!_activeCancelJobId) return;
+  try {
+    await fetch('/api/transfer/cancel', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ jobId: _activeCancelJobId })
+    });
+    const btn = document.getElementById('pp-cancel-btn');
+    if (btn) { btn.textContent = 'Cancelling…'; btn.disabled = true; }
+  } catch {}
+}
+
+function updateProgressPanel(job) {
+  const pp = document.getElementById('progress-panel');
+  if (pp.style.display === 'none' && (job.status === 'running')) {
+    pp.style.display = '';
+    const opLabel = job.operation === 'move' ? 'Moving…'
+                  : job.type === 'delete' || job.type === 'delete-permanent' ? 'Deleting…'
+                  : job.type === 'trash-empty' ? 'Emptying trash…'
+                  : job.type === 'upload' ? 'Uploading…'
+                  : job.type === 'zip'    ? 'Zipping…'
+                  : job.type === 'unzip'  ? 'Extracting…'
+                  : 'Copying…';
+    document.getElementById('pp-label').textContent = opLabel;
+    document.getElementById('pp-spin').style.display = '';
+  }
+  // Show cancel button for running transfer jobs
+  if (job.status === 'running' && job.type === 'transfer') {
+    showCancelBtn(job.jobId);
+  } else {
+    hideCancelBtn();
+  }
+  document.getElementById('pp-file').textContent = job.currentFile || 'Running on server — safe to close browser';
+  document.getElementById('pp-bar').style.width = (job.percent||0)+'%';
+  document.getElementById('pp-pct').textContent = (job.percent||0)+'%';
+  const phase = job.status === 'done'      ? 'done'
+              : job.status === 'error'     ? 'error'
+              : job.status === 'cancelled' ? 'cancelled'
+              : (job.phase || 'starting');
+  document.getElementById('pp-phase').textContent = phase.charAt(0).toUpperCase()+phase.slice(1);
+  document.getElementById('pp-phase').className = `phase-pill phase-${phase}`;
+  if (job.status !== 'running') document.getElementById('pp-spin').style.display = 'none';
+}
+function updatePP(pct, phase) {
+  document.getElementById('pp-bar').style.width = pct+'%';
+  document.getElementById('pp-pct').textContent = pct+'%';
+  document.getElementById('pp-phase').textContent = phase;
+}
+function closeProgress() { document.getElementById('progress-panel').style.display = 'none'; }
+
+// ═══════════════════════════════════════════
+// DISK
+// ═══════════════════════════════════════════
+async function loadDisk() {
+  try {
+    const r = await fetch('/api/diskinfo'); const d = await r.json();
+    const pct = Math.round(d.used/d.total*100);
+    document.getElementById('disk-fill').style.width = pct+'%';
+    document.getElementById('disk-pct').textContent = pct+'% used';
+    document.getElementById('disk-nums').textContent = `${fmtSize(d.used)} / ${fmtSize(d.total)} · ${fmtSize(d.avail)} free`;
+  } catch {}
+}
+
+// ═══════════════════════════════════════════
+// VIEW
+// ═══════════════════════════════════════════
+function setView(v) {
+  viewMode = v;
+  try { localStorage.setItem('nova_viewMode', v); } catch {}
+  document.getElementById('vgrid').classList.toggle('on', v==='grid');
+  document.getElementById('vlist').classList.toggle('on', v==='list');
+  renderFiles();
+}
+
+// ═══════════════════════════════════════════
+// MODALS
+// ═══════════════════════════════════════════
+function mkModal() {
+  document.querySelectorAll('.overlay').forEach(e=>e.remove());
+  const ov = document.createElement('div'); ov.className='overlay';
+  ov.onclick = e => { if(e.target===ov) closeModal(); };
+  const m = document.createElement('div'); m.className='modal';
+  ov.appendChild(m); document.body.appendChild(ov); return m;
+}
+function closeModal() { document.querySelectorAll('.overlay').forEach(e=>e.remove()); }
+function confirm2({title,msg,label,cls,onOk}) {
+  const m = mkModal();
+  m.innerHTML = `<h2>${title}</h2><p>${msg}</p><div class="modal-row"><button class="mbtn" onclick="closeModal()">Cancel</button><button class="mbtn ${cls}" id="cok">${label}</button></div>`;
+  document.getElementById('cok').onclick = () => { closeModal(); onOk(); };
+}
+
+// ═══════════════════════════════════════════
+// TOAST
+// ═══════════════════════════════════════════
+function toast(msg, type='ok') {
+  const w = document.getElementById('toasts');
+  const el = document.createElement('div');
+  el.className = `toast ${type}`; el.textContent = msg; w.appendChild(el);
+  setTimeout(() => { el.style.cssText='opacity:0;transition:opacity 0.25s'; setTimeout(()=>el.remove(),250); }, 2800);
+}
+
+// ═══════════════════════════════════════════
+// STATUS
+// ═══════════════════════════════════════════
+function setStatus(t, ok) {
+  document.getElementById('stext').textContent = t;
+  document.getElementById('sdot').style.background = ok ? 'var(--green)' : 'var(--yellow)';
+}
+
+// ═══════════════════════════════════════════
+// KEYBOARD
+// ═══════════════════════════════════════════
+document.addEventListener('keydown', ev => {
+  if (ev.target.tagName==='INPUT') return;
+  if (ev.ctrlKey||ev.metaKey) {
+    if (ev.key==='c') copySel();
+    if (ev.key==='x') cutSel();
+    if (ev.key==='v') doPaste();
+    if (ev.key==='a') { ev.preventDefault(); filtered.forEach(e=>selected.add(e.path)); renderFiles(); selUI(); }
+  }
+  if (ev.key==='Delete'&&selected.size) delSel();
+  if (ev.key==='F5') { ev.preventDefault(); reload(); }
+  if (ev.key==='Escape') { selected.clear(); renderFiles(); selUI(); document.querySelectorAll('.ctxmenu').forEach(e=>e.remove()); }
+  if (ev.key==='Backspace'&&!ev.target.closest('input')) { ev.preventDefault(); goBack(); }
+});
+
+// ═══════════════════════════════════════════
+// UTILS
+// ═══════════════════════════════════════════
+function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+function enc(s) { return encodeURIComponent(s); }
+
+// ═══════════════════════════════════════════
+// ═══════════════════════════════════════════
+// RESUME TRANSFER
+// ═══════════════════════════════════════════
+async function cancelJobFromPanel(jobId, btn) {
+  try {
+    btn.textContent = 'Cancelling…'; btn.disabled = true;
+    const r = await fetch('/api/transfer/cancel', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ jobId })
+    });
+    if (!r.ok) { const d = await r.json(); toast('⚠ ' + (d.error || 'Cancel failed'), 'err'); btn.textContent = 'Cancel'; btn.disabled = false; }
+    else toast('⏹ Cancelling…', 'ok');
+  } catch (e) { toast('Cancel failed: ' + e.message, 'err'); btn.textContent = 'Cancel'; btn.disabled = false; }
+}
+
+async function cancelZipJob(jobId, btn) {
+  try {
+    btn.textContent = 'Cancelling…'; btn.disabled = true;
+    const r = await fetch('/api/zip/cancel', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ jobId })
+    });
+    if (!r.ok) { const d = await r.json(); toast('⚠ ' + (d.error || 'Cancel failed'), 'err'); btn.textContent = 'Cancel'; btn.disabled = false; }
+    else toast('⏹ Cancelling…', 'ok');
+  } catch (e) { toast('Cancel failed: ' + e.message, 'err'); btn.textContent = 'Cancel'; btn.disabled = false; }
+}
+
+async function resumeZip(jobId) {
+  closeModal();
+  try {
+    const r = await fetch('/api/zip/resume', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ jobId, clientId: wsId })
+    });
+    const d = await r.json();
+    if (!r.ok) { toast('⚠ ' + (d.error || 'Resume failed'), 'err'); return; }
+    activeJobs.set(d.jobId, { jobId: d.jobId, status: 'running', percent: 0, phase: 'zipping', type: 'zip' });
+    showProgressPanel('Re-creating zip…');
+    updateJobsBadge();
+    toast('🗜 Restarting zip…', 'ok');
+  } catch (e) { toast('⚠ Resume failed: ' + e.message, 'err'); }
+}
+
+async function resumeUnzip(jobId) {
+  closeModal();
+  try {
+    const r = await fetch('/api/unzip/resume', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ jobId, clientId: wsId })
+    });
+    const d = await r.json();
+    if (!r.ok) { toast('⚠ ' + (d.error || 'Resume failed'), 'err'); return; }
+    activeJobs.set(d.jobId, { jobId: d.jobId, status: 'running', percent: 0, phase: 'extracting', type: 'unzip' });
+    showProgressPanel('Re-extracting…');
+    updateJobsBadge();
+    toast('📦 Re-extracting…', 'ok');
+  } catch (e) { toast('⚠ Resume failed: ' + e.message, 'err'); }
+}
+
+async function resumeTransfer(jobId) {
+  closeModal();
+  try {
+    const r = await fetch('/api/transfer/resume', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jobId, clientId: wsId })
+    });
+    const d = await r.json();
+    if (!r.ok) { toast('⚠ ' + (d.error || 'Resume failed'), 'err'); return; }
+    if (d.message) { toast('✓ ' + d.message, 'ok'); return; } // already complete
+    toast(`⟳ Resuming transfer (${d.remainingFiles} file(s) left)`, 'ok');
+    activeJobs.set(d.jobId, { jobId: d.jobId, status: 'running', percent: 0, phase: 'resuming', type: 'transfer' });
+    showProgressPanel('Resuming…');
+    updateJobsBadge();
+  } catch (e) { toast('⚠ Resume failed: ' + e.message, 'err'); }
+}
+
+// ═══════════════════════════════════════════
+// RESTORE RUNNING JOBS ON PAGE LOAD/REOPEN
+// ═══════════════════════════════════════════
+async function restoreRunningJobs() {
+  try {
+    const r = await fetch('/api/jobs');
+    const d = await r.json();
+    // Show ALL running jobs — wsId is now in localStorage so it persists
+    // across browser restarts; jobs started before the browser closed will
+    // still match. But even if the wsId changed we still show them all.
+    const running = (d.jobs || []).filter(j => j.status === 'running');
+    if (!running.length) return;
+    for (const job of running) {
+      activeJobs.set(job.jobId, job);
+    }
+    const latest = running.sort((a,b) => new Date(b.startedAt)-new Date(a.startedAt))[0];
+    updateProgressPanel(latest);
+    // Re-attach cancel button if the job supports it
+    if (latest.type === 'transfer') showCancelBtn(latest.jobId);
+    updateJobsBadge();
+    toast(`⟳ Reconnected to ${running.length} running job(s)`, 'ok');
+  } catch {}
+}
+
+initWS();
+restoreRunningJobs();
+// Sync view toggle buttons with persisted mode
+document.getElementById('vgrid').classList.toggle('on', viewMode === 'grid');
+document.getElementById('vlist').classList.toggle('on', viewMode === 'list');
+// Honour ?path= from PWA shortcuts or shared URLs
+const _startPath = new URLSearchParams(location.search).get('path') || '/';
+nav(_startPath);
+renderPinnedPlaces();
+loadDisk();
+loadTrash();
+setInterval(loadDisk, 30000);
+setInterval(loadTrash, 8000);
+
+// Poll running jobs so progress panel updates even if WS reconnects or browser was reopened
+setInterval(async () => {
+  const hasActive = [...activeJobs.values()].some(j=>j.status==='running');
+  if (!hasActive) return;
+  try {
+    const r = await fetch('/api/jobs');
+    const d = await r.json();
+    for (const job of d.jobs) {
+      if (job.status==='running' || activeJobs.has(job.jobId)) {
+        activeJobs.set(job.jobId, job);
+        updateProgressPanel(job);
+        // Handle completion detected via poll (in case WS missed it)
+        const terminal = job.status === 'done' || job.status === 'error' || job.status === 'cancelled';
+        if (terminal && !finishedJobs.has(job.jobId)) {
+          finishedJobs.add(job.jobId);
+          hideCancelBtn();
+          if (job.status === 'done') {
+            setTimeout(() => closeProgress(), 2500);
+            const label = job.type === 'delete' || job.type === 'delete-permanent' ? '🗑 Delete complete'
+                        : job.type === 'trash-empty' ? '🗑 Trash emptied'
+                        : job.type === 'upload'  ? '✓ Upload saved'
+                        : job.type === 'zip'     ? '🗜 Zip complete'
+                        : job.type === 'unzip'   ? '📦 Extracted'
+                        : `✓ ${job.operation === 'move' ? 'Move' : 'Copy'} complete`;
+            toast(label, 'ok');
+            reload(); loadTrash();
+          } else if (job.status === 'cancelled') {
+            const cancelMsg2 = job.type === 'zip'   ? '⏹ Zip cancelled — open Jobs to resume'
+                             : job.type === 'unzip' ? '⏹ Extract cancelled — open Jobs to resume'
+                             : '⏹ Transfer cancelled — open Jobs to resume';
+            toast(cancelMsg2, 'warn');
+            reload();
+          } else {
+            toast('⚠ ' + (job.error || 'Operation failed'), 'err');
+          }
+        }
+      }
+    }
+    updateJobsBadge();
+  } catch {}
+}, 2000);
+</script>
+</body>
+</html>
