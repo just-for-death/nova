@@ -13,7 +13,7 @@ services:
       - PORT=9898
       - NODE_ENV=production
       - LOG_LEVEL=${LOG_LEVEL:-info}
-      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - LOG_FORMAT=${LOG_FORMAT:-pretty}
       - COPY_WORKERS=${COPY_WORKERS:-4}
       # Gotify (optional) - push notifications for jobs + cancels + AI ops
       - GOTIFY_URL=${GOTIFY_URL:-}

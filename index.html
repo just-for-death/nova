@@ -223,7 +223,25 @@ body {
 }
 .disk-nums { font-size: 10.5px; color: var(--text3); font-family: var(--font-mono); }
 
-/* ── SETTINGS ─────────────────────────────────────── */
+/* ── SYMLINKS ─────────────────────────────────────── */
+.sym-badge {
+  position: absolute; top: 4px; right: 4px;
+  font-size: 11px; line-height: 1;
+  background: var(--accentbg); color: var(--accent3);
+  border-radius: 4px; padding: 1px 4px;
+  pointer-events: none;
+}
+.sym-badge.sym-broken { background: rgba(217,95,95,.15); color: var(--red); }
+.sym-badge-inline {
+  font-size: 10px; color: var(--accent3);
+  margin-left: 5px; opacity: 0.8;
+  font-family: var(--font-mono);
+}
+.sym-badge-inline.sym-broken { color: var(--red); }
+.fitem-grid { position: relative; }
+.sym-broken-item { opacity: 0.6; }
+.sym-broken-item .grid-name,
+.sym-broken-item .list-name { color: var(--red); }
 .settings-group { margin-bottom: 20px; }
 .settings-group-title {
   font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
@@ -989,9 +1007,20 @@ function renderBC(p) {
 const ICONS = {
   dir: '📁', img: '🖼', video: '🎬', audio: '🎵', pdf: '📄',
   zip: '📦', code: '⌨', text: '📝', config: '⚙', web: '🌐',
-  dot: '🔒', file: '📄'
+  dot: '🔒', file: '📄',
+  symDir: '🔗', symFile: '🔗', symBroken: '⚠'
 };
 function fileIcon(e) {
+  if (e.type === 'symlink-broken') return ICONS.symBroken;
+  if (e.type === 'symlink-dir')    return ICONS.symDir;
+  if (e.type === 'symlink-file') {
+    // Show the file type icon with a link overlay handled in CSS
+    const m = e.mime || '', x = e.name.split('.').pop().toLowerCase();
+    if (m.startsWith('image/')) return ICONS.img;
+    if (m.startsWith('video/')) return ICONS.video;
+    if (m.startsWith('audio/')) return ICONS.audio;
+    return ICONS.symFile;
+  }
   if (e.type === 'directory') return ICONS.dir;
   const m = e.mime || '', x = e.name.split('.').pop().toLowerCase();
   if (m.startsWith('image/')) return ICONS.img;
@@ -1063,24 +1092,33 @@ function renderFiles() {
 }
 function gridItem(e, cuts) {
   const s = selected.has(e.path), c = cuts.has(e.path);
-  const isImg = e.mime && e.mime.startsWith('image/');
+  const isImg = e.mime && e.mime.startsWith('image/') && !e.isSymlink;
+  const isBroken = e.type === 'symlink-broken';
   const iconHtml = isImg
     ? `<div class="grid-thumb"><img src="/api/preview?path=${enc(e.path)}" loading="lazy" onerror="this.parentNode.innerHTML='<span class=grid-thumb-fail>🖼</span>'"></div>`
     : `<div class="grid-icon">${fileIcon(e)}</div>`;
-  return `<div class="fitem-grid ${s?'sel':''} ${c?'cut':''}" data-path="${e.path}" data-type="${e.type}">
+  const symBadge = e.isSymlink
+    ? `<div class="sym-badge ${isBroken?'sym-broken':''}" title="${isBroken?'Broken symlink':'Symlink → '+esc(e.linkTarget||'')}">⇢</div>`
+    : '';
+  return `<div class="fitem-grid ${s?'sel':''} ${c?'cut':''} ${isBroken?'sym-broken-item':''}" data-path="${e.path}" data-type="${e.type}">
     <div class="item-cb">${s?'✓':''}</div>
-    ${iconHtml}
+    ${iconHtml}${symBadge}
     <div class="grid-name">${esc(e.name)}</div>
-    <div class="grid-size">${e.type==='directory'?'':fmtSize(e.size)}</div>
+    <div class="grid-size">${e.type==='directory'||e.type==='symlink-dir'?'':fmtSize(e.size)}</div>
   </div>`;
 }
 function listItem(e, cuts) {
   const s = selected.has(e.path), c = cuts.has(e.path);
-  return `<div class="fitem-list ${s?'sel':''} ${c?'cut':''}" data-path="${e.path}" data-type="${e.type}">
+  const isBroken = e.type === 'symlink-broken';
+  const symBadge = e.isSymlink
+    ? `<span class="sym-badge-inline ${isBroken?'sym-broken':''}" title="${isBroken?'Broken symlink':'→ '+esc(e.linkTarget||'')}">⇢</span>`
+    : '';
+  const isDir = e.type === 'directory' || e.type === 'symlink-dir';
+  return `<div class="fitem-list ${s?'sel':''} ${c?'cut':''} ${isBroken?'sym-broken-item':''}" data-path="${e.path}" data-type="${e.type}">
     <span class="item-cb-list">${s?'✓':''}</span>
     <span class="list-icon">${fileIcon(e)}</span>
-    <span class="list-name">${esc(e.name)}</span>
-    <span class="list-size">${e.type==='directory'?'—':fmtSize(e.size)}</span>
+    <span class="list-name">${esc(e.name)}${symBadge}</span>
+    <span class="list-size">${isDir?'—':fmtSize(e.size)}</span>
     <span class="list-date">${fmtDate(e.modified)}</span>
     <span class="list-perm">${e.permissions||'—'}</span>
   </div>`;
@@ -1093,9 +1131,9 @@ let lastSel = null;
 function clickItem(ev, p, type) {
   // Clicking the checkbox always toggles selection regardless of type
   const cbClicked = ev.target.classList.contains('item-cb') || ev.target.classList.contains('item-cb-list');
+  const isDir = type === 'directory' || type === 'symlink-dir';
 
-  if (type === 'directory' && !cbClicked && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
-    // Plain click on a folder = navigate
+  if (isDir && !cbClicked && !ev.shiftKey && !ev.ctrlKey && !ev.metaKey) {
     nav(p); return;
   }
   if (ev.shiftKey && lastSel) {
@@ -1110,7 +1148,8 @@ function clickItem(ev, p, type) {
   lastSel = p; renderFiles(); selUI();
 }
 function dblItem(p, type) {
-  if (type === 'directory') { nav(p); return; }
+  if (type === 'directory' || type === 'symlink-dir') { nav(p); return; }
+  if (type === 'symlink-broken') { toast('Broken symlink — target does not exist', 'warn'); return; }
   const ext = p.split('.').pop().toLowerCase();
   if (EDITABLE_EXTS_UI.has(ext)) { openEditor(p); return; }
   previewFile(p);
@@ -1711,24 +1750,30 @@ function showProps(p) {
   const e = filtered.find(x => x.path === p);
   if (!e) { toast('Item not found in current view', 'err'); return; }
 
-  const isDir = e.type === 'directory';
+  const isDir    = e.type === 'directory' || e.type === 'symlink-dir';
+  const isBroken = e.type === 'symlink-broken';
   const icon = isDir
     ? `<div style="text-align:center;font-size:44px;margin-bottom:14px">&#128193;</div>`
-    : (e.mime && e.mime.startsWith('image/')
+    : (e.mime && e.mime.startsWith('image/') && !e.isSymlink
         ? `<img src="/api/preview?path=${enc(p)}" style="max-width:100%;max-height:130px;object-fit:contain;border-radius:8px;display:block;margin:0 auto 14px" onerror="this.style.display='none'">`
         : `<div style="text-align:center;font-size:44px;margin-bottom:14px">${fileIcon(e)}</div>`);
 
   const m = mkModal();
 
   function renderTable(sizeVal) {
+    let typeLabel = isDir ? 'Directory' : (e.mime || 'File');
+    if (e.isSymlink) typeLabel += isBroken ? ' (broken symlink)' : ' (symlink)';
     const rows = [
       ['Name',        esc(e.name)],
       ['Path',        esc(e.path)],
-      ['Type',        esc(isDir ? 'Directory' : (e.mime || 'File'))],
+      ['Type',        esc(typeLabel)],
+    ];
+    if (e.isSymlink) rows.push(['→ Target', `<span style="font-family:var(--font-mono);color:${isBroken?'var(--red)':'var(--accent3)'}">${esc(e.linkTarget||'unknown')}</span>`]);
+    rows.push(
       ['Size',        sizeVal],
       ['Modified',    esc(fmtDate(e.modified))],
       ['Permissions', esc(e.permissions || '—')],
-    ];
+    );
     return rows.map(([k,v]) => `<tr>
       <td style="color:var(--text3);padding:7px 0;width:100px;vertical-align:top;font-family:var(--font-sans);font-size:12px">${k}</td>
       <td style="color:var(--text);padding:7px 0;font-family:var(--font-mono);font-size:11.5px;word-break:break-all" id="prop-${k.toLowerCase()}">${v}</td>
@@ -1748,7 +1793,7 @@ function showProps(p) {
     </div>
     <div class="modal-row">
       <button class="mbtn" onclick="closeModal()">Close</button>
-      ${!isDir ? `<button class="mbtn ok" onclick="dlFile('${esc(p)}')">&#8595; Download</button>` : ''}
+      ${!isDir && !isBroken ? `<button class="mbtn ok" onclick="dlFile('${esc(p)}')">&#8595; Download</button>` : ''}
     </div>`;
 
   // For directories: stream size via SSE — no blocking, updates live

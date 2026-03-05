@@ -14,53 +14,72 @@ const server = http.createServer(app);
 const wss    = new WebSocket.Server({ server });
 
 // ─────────────────────────────────────────────────────────────────
-// STRUCTURED LOGGER  (Dozzle-friendly JSON + human fallback)
+// LOGGER — clean structured output, easy to read in any log viewer
+// Set LOG_LEVEL=debug|info|warn|error  (default: info)
+// Set LOG_FORMAT=pretty|json           (default: pretty)
 // ─────────────────────────────────────────────────────────────────
 const LOG_LEVEL  = (process.env.LOG_LEVEL  || 'info').toLowerCase();
-const LOG_FORMAT = (process.env.LOG_FORMAT || 'json').toLowerCase(); // 'json' | 'text'
+const LOG_FORMAT = (process.env.LOG_FORMAT || 'pretty').toLowerCase();
 const LEVELS     = { debug: 0, info: 1, warn: 2, error: 3 };
 const lvlNum     = () => LEVELS[LOG_LEVEL] ?? 1;
 
-// Emoji status icons for human-readable text mode
-const LEVEL_ICON = { debug: '🔍', info: '●', warn: '⚠', error: '✖' };
+// ANSI colour helpers (stripped automatically when not a TTY)
+const isTTY = process.stdout.isTTY;
+const C = {
+  reset:  isTTY ? '\x1b[0m'  : '',
+  bold:   isTTY ? '\x1b[1m'  : '',
+  dim:    isTTY ? '\x1b[2m'  : '',
+  blue:   isTTY ? '\x1b[34m' : '',
+  cyan:   isTTY ? '\x1b[36m' : '',
+  green:  isTTY ? '\x1b[32m' : '',
+  yellow: isTTY ? '\x1b[33m' : '',
+  red:    isTTY ? '\x1b[31m' : '',
+  magenta:isTTY ? '\x1b[35m' : '',
+};
+
+const LEVEL_STYLE = {
+  debug: { color: C.cyan,   label: 'DEBUG' },
+  info:  { color: C.green,  label: 'INFO ' },
+  warn:  { color: C.yellow, label: 'WARN ' },
+  error: { color: C.red,    label: 'ERROR' },
+};
 
 function log(level, msg, meta = {}) {
   if ((LEVELS[level] ?? 1) < lvlNum()) return;
-  const ts = new Date().toISOString();
+
+  const ts  = new Date().toISOString();
+  const out = level === 'error' ? process.stderr : process.stdout;
 
   if (LOG_FORMAT === 'json') {
-    // Structured JSON — Dozzle parses this automatically when log_format=json
-    const entry = {
-      time:    ts,
-      level,
-      msg,
-      service: 'nova',
-      pid:     process.pid,
-      ...meta
-    };
-    // Dozzle surfaces 'level', 'msg', and top-level fields — keep them flat
-    const line = JSON.stringify(entry);
-    if (level === 'error') process.stderr.write(line + '\n');
-    else                   process.stdout.write(line + '\n');
-  } else {
-    // Human-readable text fallback
-    const icon    = LEVEL_ICON[level] || '·';
-    const tag     = level.toUpperCase().padEnd(5);
-    const metaStr = Object.keys(meta).length
-      ? '  ' + Object.entries(meta).map(([k,v]) => `${k}=${JSON.stringify(v)}`).join(' ')
-      : '';
-    const line = `${ts} ${icon} [${tag}] ${msg}${metaStr}`;
-    if (level === 'error') console.error(line);
-    else if (level === 'warn')  console.warn(line);
-    else console.log(line);
+    // Compact JSON — one line, machine-parseable
+    out.write(JSON.stringify({ time: ts, level, msg, ...meta }) + '\n');
+    return;
   }
+
+  // ── Pretty format ────────────────────────────────────────────────
+  const { color, label } = LEVEL_STYLE[level] || LEVEL_STYLE.info;
+  const time = `${C.dim}${ts.slice(11, 23)}${C.reset}`;           // HH:MM:SS.mmm
+  const lvl  = `${color}${C.bold}${label}${C.reset}`;
+  const text = `${C.bold}${msg}${C.reset}`;
+
+  // Format meta fields inline: key=value key2=value2
+  const metaStr = Object.entries(meta)
+    .filter(([, v]) => v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => {
+      const val = typeof v === 'object' ? JSON.stringify(v) : String(v);
+      return `${C.dim}${k}${C.reset}=${C.cyan}${val}${C.reset}`;
+    })
+    .join('  ');
+
+  const line = [time, lvl, text, metaStr].filter(Boolean).join('  ');
+  out.write(line + '\n');
 }
 
-// Convenience shortcuts
+// Shortcuts
+const logDebug = (msg, meta) => log('debug', msg, meta);
 const logInfo  = (msg, meta) => log('info',  msg, meta);
 const logWarn  = (msg, meta) => log('warn',  msg, meta);
 const logError = (msg, meta) => log('error', msg, meta);
-const logDebug = (msg, meta) => log('debug', msg, meta);
 
 // ─────────────────────────────────────────────────────────────────
 // PROCESS HEALTH — catch anything that would silently crash/hang
@@ -360,16 +379,38 @@ app.get('/api/list', (req, res) => {
       .filter(e => e.name !== '.nova_trash')
       .map(e => {
         const fullPath = path.join(dir, e.name);
-        let stat = {};
-        try { stat = fs.statSync(fullPath); } catch {}
+        const isSymlink = e.isSymbolicLink();
+
+        // lstat = info about the link itself; stat = info about the target
+        let lstStat = {}, tgtStat = null, linkTarget = null, brokenLink = false;
+        try { lstStat = fs.lstatSync(fullPath); } catch {}
+
+        if (isSymlink) {
+          try { linkTarget = fs.readlinkSync(fullPath); } catch {}
+          try {
+            tgtStat = fs.statSync(fullPath); // follows the link
+          } catch {
+            brokenLink = true; // target doesn't exist or is a loop
+          }
+        }
+
+        // For type resolution: follow the link to see if target is a dir
+        const statToUse = tgtStat || lstStat;
+        const isDir  = isSymlink ? (!brokenLink && tgtStat?.isDirectory()) : e.isDirectory();
+        const type   = isSymlink ? (brokenLink ? 'symlink-broken' : isDir ? 'symlink-dir' : 'symlink-file') :
+                       e.isDirectory() ? 'directory' : 'file';
+
         return {
           name:        e.name,
           path:        toVirtual(fullPath),
-          type:        e.isDirectory() ? 'directory' : 'file',
-          size:        stat.size  || 0,
-          modified:    stat.mtime || null,
-          mime:        e.isDirectory() ? null : (mime.lookup(e.name) || 'application/octet-stream'),
-          permissions: stat.mode  ? (stat.mode & 0o777).toString(8) : '---'
+          type,
+          isSymlink,
+          linkTarget:  linkTarget || null,
+          brokenLink:  brokenLink || false,
+          size:        statToUse.size  || 0,
+          modified:    statToUse.mtime || null,
+          mime:        isDir ? null : (mime.lookup(e.name) || 'application/octet-stream'),
+          permissions: lstStat.mode ? (lstStat.mode & 0o777).toString(8) : '---'
         };
       });
     res.json({ path: toVirtual(dir), entries: files });
@@ -396,18 +437,28 @@ app.get('/api/diskinfo', (req, res) => {
 app.get('/api/stat', (req, res) => {
   const p = resolvePath(req.query.path);
   try {
-    const stat = fs.statSync(p);
+    const lst  = fs.lstatSync(p);                          // info about link itself
+    const isSymlink = lst.isSymbolicLink();
+    let stat = lst, linkTarget = null, brokenLink = false;
+    if (isSymlink) {
+      try { linkTarget = fs.readlinkSync(p); } catch {}
+      try { stat = fs.statSync(p); }                       // follow to target
+      catch { brokenLink = true; stat = lst; }
+    }
     res.json({
       name:        path.basename(p),
       path:        toVirtual(p),
       size:        stat.size,
       modified:    stat.mtime,
       created:     stat.birthtime,
-      permissions: (stat.mode & 0o777).toString(8),
+      permissions: (lst.mode & 0o777).toString(8),
       isDirectory: stat.isDirectory(),
+      isSymlink,
+      linkTarget:  linkTarget || null,
+      brokenLink:  brokenLink || false,
       mime:        mime.lookup(p) || null
     });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(err.code === 'ENOENT' ? 404 : 500).json({ error: err.message }); }
 });
 
 app.get('/api/preview', (req, res) => {
@@ -539,13 +590,24 @@ const PROGRESS_FLUSH_MS = 300;        // send WS progress at most every 300ms
 const PART_EXT         = '.nova_part';
 
 // ── Async directory walk ─────────────────────────────────────────
-// Yields {srcAbs, relPath} for every non-symlink file under dirAbs.
-// Uses async opendir so it never blocks the event loop.
-async function* walkDir(dirAbs, relBase, depth = 0) {
+// Yields {srcAbs, relPath} for every file under dirAbs.
+// Follows symlinks to directories but tracks realpath to avoid loops.
+async function* walkDir(dirAbs, relBase, depth = 0, _seen = new Set()) {
   if (depth > 60) {
     log('warn', 'walkDir: max depth reached', { dir: dirAbs });
     return;
   }
+
+  // Resolve to detect symlink loops
+  let realDir;
+  try { realDir = await fs.promises.realpath(dirAbs); }
+  catch { realDir = dirAbs; }
+  if (_seen.has(realDir)) {
+    log('debug', 'walkDir: skipping symlink loop', { dir: dirAbs, realpath: realDir });
+    return;
+  }
+  _seen.add(realDir);
+
   let dir;
   try { dir = await fs.promises.opendir(dirAbs); }
   catch (e) { log('warn', 'walkDir: cannot open dir', { dir: dirAbs, error: e.message }); return; }
@@ -553,12 +615,18 @@ async function* walkDir(dirAbs, relBase, depth = 0) {
   for await (const entry of dir) {
     const abs = path.join(dirAbs, entry.name);
     const rel = path.join(relBase, entry.name);
+
     if (entry.isSymbolicLink()) {
-      log('debug', 'walkDir: skipping symlink', { path: abs });
-      continue;
-    }
-    if (entry.isDirectory()) {
-      yield* walkDir(abs, rel, depth + 1);
+      // Resolve the link target
+      let tgt;
+      try { tgt = await fs.promises.stat(abs); } catch { continue; } // broken link — skip
+      if (tgt.isDirectory()) {
+        yield* walkDir(abs, rel, depth + 1, _seen); // recurse into symlinked dir
+      } else if (tgt.isFile()) {
+        yield { srcAbs: abs, relPath: rel };
+      }
+    } else if (entry.isDirectory()) {
+      yield* walkDir(abs, rel, depth + 1, _seen);
     } else if (entry.isFile()) {
       yield { srcAbs: abs, relPath: rel };
     }
@@ -1116,14 +1184,23 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
 
         const copyStart = Date.now();
         try {
-          await copyOneFile(f.srcAbs, effectiveDest, startByte, f.size, pct => {
-            // With multiple workers the currentFile shown is "last updated" — that's fine
-            const bytesDone = doneBytes + startByte + (pct / 100) * Math.max(0, f.size - startByte);
-            updateJob(job, {
-              currentFile: fname, filePercent: pct,
-              percent: Math.round((bytesDone / Math.max(totalBytes, 1)) * 100)
+          // If source is a symlink, recreate the link at destination
+          const srcLst = await fs.promises.lstat(f.srcAbs).catch(() => null);
+          if (srcLst && srcLst.isSymbolicLink()) {
+            const target = await fs.promises.readlink(f.srcAbs);
+            await fs.promises.mkdir(path.dirname(effectiveDest), { recursive: true });
+            try { await fs.promises.unlink(effectiveDest); } catch {}
+            await fs.promises.symlink(target, effectiveDest);
+            log('debug', `[${jid}] Symlink recreated`, { link: effectiveDest, target });
+          } else {
+            await copyOneFile(f.srcAbs, effectiveDest, startByte, f.size, pct => {
+              const bytesDone = doneBytes + startByte + (pct / 100) * Math.max(0, f.size - startByte);
+              updateJob(job, {
+                currentFile: fname, filePercent: pct,
+                percent: Math.round((bytesDone / Math.max(totalBytes, 1)) * 100)
+              });
             });
-          });
+          }
         } catch (e) {
           const errMsg = `Failed to copy "${fname}": ${e.message}`;
           log('error', `[${jid}] Copy failed`, { file: fname, code: e.code, error: e.message, start_byte: startByte });
@@ -1507,7 +1584,7 @@ async function runZip(job, sources, destAbs) {
         const abs  = resolvePath(src);
         const name = path.basename(abs);
         try {
-          const s = fs.statSync(abs);
+          const s = fs.statSync(abs); // follows symlinks — zip the target content
           if (s.isDirectory()) archive.directory(abs, name);
           else                  archive.file(abs, { name });
         } catch (e) { job.log.push(`Skipped ${name}: ${e.message}`); }
@@ -1705,17 +1782,34 @@ app.get('/api/dirsize', (req, res) => {
     else res.write(': hb\n\n');
   }, 1000);
 
+  const _seen = new Set(); // track real paths to avoid symlink loops
+
   // Async dir walk using a queue — never blocks the event loop
   async function walk(dir, depth) {
     if (aborted || depth > 50) return;
+    // Track realpath for symlink loop detection
+    let realDir; try { realDir = await fs.promises.realpath(dir); } catch { realDir = dir; }
+    if (depth === 0) _seen.add(realDir); // seed with root on first call
     let entries;
     try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); }
-    catch { return; } // permission denied etc — skip silently
+    catch { return; }
 
     for (const entry of entries) {
       if (aborted) return;
       const full = path.join(dir, entry.name);
-      if (entry.isSymbolicLink()) continue;
+      if (entry.isSymbolicLink()) {
+        // Follow symlink — skip if broken or loops back to a seen dir
+        let tgt;
+        try { tgt = await fs.promises.stat(full); } catch { continue; }
+        if (tgt.isDirectory()) {
+          let real; try { real = await fs.promises.realpath(full); } catch { real = full; }
+          if (!_seen.has(real)) { _seen.add(real); await walk(full, depth + 1); }
+        } else if (tgt.isFile()) {
+          totalBytes += tgt.size; totalFiles++;
+          if (totalFiles % 500 === 0) await new Promise(r => setImmediate(r));
+        }
+        continue;
+      }
       if (entry.isDirectory()) {
         await walk(full, depth + 1);
       } else if (entry.isFile()) {
@@ -2225,13 +2319,13 @@ app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.ht
 
 server.listen(PORT, () => {
   log('info', 'Nova File Manager started', {
-    port:        PORT,
-    root:        ROOT || '/',
-    pid:         process.pid,
-    node:        process.version,
-    log_level:   LOG_LEVEL,
-    log_format:  LOG_FORMAT,
-    ollama_url:  process.env.OLLAMA_URL || 'http://localhost:11434',
-    gotify:      !!process.env.GOTIFY_URL,
+    port:       PORT,
+    root:       ROOT || '/',
+    pid:        process.pid,
+    node:       process.version,
+    log_level:  LOG_LEVEL,
+    log_format: LOG_FORMAT,
+    ollama:     process.env.OLLAMA_URL || 'http://localhost:11434',
+    gotify:     !!process.env.GOTIFY_URL,
   });
 });
