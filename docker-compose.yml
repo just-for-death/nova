@@ -36,7 +36,7 @@ services:
       start_period: 15s
     labels:
       - "com.nova.description=Nova File Manager"
-      - "com.nova.version=8"
+      - "com.nova.version=25"
 
   monitor:
     build:
