@@ -5,25 +5,30 @@ services:
       dockerfile: Dockerfile
     container_name: nova-filemanager
     ports:
-      - "${HOST_PORT:-9898}:9898"
+      - "9898:9898"
     volumes:
       - /:/hostroot:rw
     environment:
       - ROOT_PATH=/hostroot
       - PORT=9898
       - NODE_ENV=production
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - LOG_FORMAT=${LOG_FORMAT:-pretty}
-      - COPY_WORKERS=${COPY_WORKERS:-4}
+      - LOG_LEVEL=info
+      - LOG_FORMAT=pretty
+      - COPY_WORKERS=4
+      # Persistent secret to prevent session loss on restart
+      - AUTH_SECRET=nova-persistent-secret-change-me-for-security
       # Gotify (optional) - push notifications for jobs + cancels + AI ops
-      - GOTIFY_URL=${GOTIFY_URL:-}
-      - GOTIFY_TOKEN=${GOTIFY_TOKEN:-}
+      - GOTIFY_URL=
+      - GOTIFY_TOKEN=
       # Ollama AI (optional) - set to your Ollama host
-      # If Ollama runs on the host machine use host-gateway below
-      - OLLAMA_URL=${OLLAMA_URL:-http://host-gateway:11434}
-      - OLLAMA_TEXT_MODEL=${OLLAMA_TEXT_MODEL:-llama3.2:1b}
-      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-moondream:latest}
-      - OLLAMA_EMBED_MODEL=${OLLAMA_EMBED_MODEL:-nomic-embed-text:latest}
+      - OLLAMA_URL=http://host-gateway:11434
+      - OLLAMA_TEXT_MODEL=llama3.2:1b
+      - OLLAMA_VISION_MODEL=moondream:latest
+      - OLLAMA_EMBED_MODEL=nomic-embed-text:latest
+      # Buffering & Rate Limiting
+      - COPY_HWM=2097152
+      - OLLAMA_RATE_LIMIT=30
+      - OLLAMA_RATE_WINDOW=60000
     extra_hosts:
       - "host-gateway:host-gateway"
     restart: unless-stopped
@@ -48,13 +53,13 @@ services:
       filemanager:
         condition: service_healthy
     ports:
-      - "${MONITOR_PORT:-9091}:9090"
+      - "9091:9090"
     environment:
       - MONITOR_TARGET=http://nova-filemanager:9898
-      - CHECK_INTERVAL_SEC=${CHECK_INTERVAL_SEC:-30}
-      - FAIL_THRESHOLD=${FAIL_THRESHOLD:-3}
-      - GOTIFY_URL=${GOTIFY_URL:-}
-      - GOTIFY_TOKEN=${GOTIFY_TOKEN:-}
+      - CHECK_INTERVAL_SEC=30
+      - FAIL_THRESHOLD=3
+      - GOTIFY_URL=
+      - GOTIFY_TOKEN=
       - APP_NAME=Nova File Manager
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9090"]
