@@ -122,12 +122,25 @@ process.on('SIGINT',  () => { log('info', 'Received SIGINT  — shutting down');
 // ── Process memory monitor ──────────────────────────────────────
 setInterval(() => {
   const mem  = process.memoryUsage();
+  
+  // High-uptime Memory Leak Prevention: Purge in-memory jobs that completed >1hr ago.
+  // They are safely persisted in SQLite if needed by /api/jobs history.
+  const now = Date.now();
+  for (const [id, job] of jobs.entries()) {
+    if (job.status !== 'running' && job.finishedAt && (now - new Date(job.finishedAt).getTime() > 60 * 60 * 1000)) {
+      jobs.delete(id);
+    }
+  }
+
+  // High-uptime Storage Leak Prevention: DB keeps 7 days history
+  run(`DELETE FROM jobs WHERE status != 'running' AND startedAt < datetime('now', '-7 days')`).catch(()=>{});
+
   const running = [...jobs.values()].filter(j => j.status === 'running');
   log('debug', 'Memory snapshot', {
     rss_mb:    Math.round(mem.rss      / 1024 / 1024),
     heap_mb:   Math.round(mem.heapUsed / 1024 / 1024),
+    tracking_jobs: jobs.size,
     running_jobs: running.length,
-    running_ids:  running.map(j => j.jobId.slice(0,8)).join(',') || null,
     uptime_s:  Math.round(process.uptime())
   });
 }, 60_000).unref();
@@ -3361,7 +3374,9 @@ app.post('/api/ollama/search', async (req, res) => {
           const fd = await ollamaFetch('/api/embeddings', { model: MODEL_EMBED, prompt: textChunk }, 20_000);
           de = fd.embedding;
           
-          await run(`INSERT OR REPLACE INTO embeddings (filePath, mtime, model, embedding) VALUES (?, ?, ?, ?)`,
+          // Purge stale vectors before saving the updated snapshot
+          await run(`DELETE FROM embeddings WHERE filePath = ? AND model = ?`, [full, MODEL_EMBED]);
+          await run(`INSERT INTO embeddings (filePath, mtime, model, embedding) VALUES (?, ?, ?, ?)`,
                     [full, mtime, MODEL_EMBED, JSON.stringify(de)]);
         }
 
