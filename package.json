@@ -8,6 +8,12 @@
     "mime-types": "^2.1.35",
     "archiver": "^6.0.1",
     "ws": "^8.16.0",
-    "uuid": "^9.0.0"
+    "uuid": "^9.0.0",
+    "sqlite3": "^5.1.7"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "monitor": "node monitor.js",
+    "lint": "eslint ."
   }
 }

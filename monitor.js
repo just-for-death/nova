@@ -26,18 +26,22 @@ function log(level, msg) {
 }
 
 function checkHealth() {
-  const url = `${TARGET_URL}/api/diskinfo`;
-  const mod = url.startsWith('https') ? https : http;
-  const req = mod.get(url, { timeout: 8000 }, (res) => {
-    if (res.statusCode === 200) {
-      onUp();
-    } else {
-      onFail(`HTTP ${res.statusCode}`);
-    }
-    res.resume(); // drain
-  });
-  req.on('error', (err) => onFail(err.message));
-  req.on('timeout', () => { req.destroy(); onFail('Request timed out'); });
+  try {
+    const url = `${TARGET_URL}/api/health`;
+    const mod = url.startsWith('https') ? https : http;
+    const req = mod.get(url, { timeout: 8000 }, (res) => {
+      if (res.statusCode === 200) {
+        onUp();
+      } else {
+        onFail(`HTTP ${res.statusCode}`);
+      }
+      res.resume(); // drain
+    });
+    req.on('error', (err) => onFail(err.message));
+    req.on('timeout', () => { req.destroy(); onFail('Request timed out'); });
+  } catch (err) {
+    onFail(`Monitor error: ${err.message}`);
+  }
 }
 
 function onUp() {
@@ -75,26 +79,41 @@ function sendGotify(title, message, priority = 5) {
     log('debug', `Gotify not configured — skipping alert: ${title}`);
     return;
   }
+  
   const body = JSON.stringify({ title, message, priority });
-  const url  = new URL(`${GOTIFY_URL}/message?token=${GOTIFY_TOKEN}`);
-  const mod  = url.protocol === 'https:' ? https : http;
-  const req  = mod.request({
-    hostname: url.hostname,
-    port:     url.port || (url.protocol === 'https:' ? 443 : 80),
-    path:     url.pathname + url.search,
-    method:   'POST',
-    headers:  { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
-  }, (res) => {
-    res.resume();
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      log('info', `Gotify alert sent: "${title}"`);
-    } else {
-      log('warn', `Gotify returned HTTP ${res.statusCode}`);
-    }
-  });
-  req.on('error', (e) => log('warn', `Gotify send failed: ${e.message}`));
-  req.write(body);
-  req.end();
+  try {
+    const baseUrl = GOTIFY_URL.endsWith('/') ? GOTIFY_URL.slice(0, -1) : GOTIFY_URL;
+    const url  = new URL(`${baseUrl}/message?token=${encodeURIComponent(GOTIFY_TOKEN)}`);
+    const mod  = url.protocol === 'https:' ? https : http;
+    
+    const req  = mod.request({
+      hostname: url.hostname,
+      port:     url.port || (url.protocol === 'https:' ? 443 : 80),
+      path:     url.pathname + url.search,
+      method:   'POST',
+      timeout:  5000,
+      headers:  { 
+        'Content-Type': 'application/json', 
+        'Content-Length': Buffer.byteLength(body) 
+      }
+    }, (res) => {
+      res.on('data', () => {}); // drain
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          log('info', `Gotify alert sent: "${title}"`);
+        } else {
+          log('warn', `Gotify returned HTTP ${res.statusCode}`);
+        }
+      });
+    });
+
+    req.on('error', (e) => log('error', `Gotify send failed: ${e.message}`));
+    req.on('timeout', () => { req.destroy(); log('warn', 'Gotify request timed out'); });
+    req.write(body);
+    req.end();
+  } catch (err) {
+    log('error', `Invalid Gotify URL or configuration: ${err.message}`);
+  }
 }
 
 // ── status HTTP server (so docker healthcheck works) ───────────────────────

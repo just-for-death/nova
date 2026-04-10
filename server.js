@@ -4,10 +4,12 @@ const WebSocket  = require('ws');
 const path       = require('path');
 const fs         = require('fs');
 const { exec, execFile } = require('child_process');
-const { v4: uuidv4 }  = require('uuid');
-const mime       = require('mime-types');
-const archiver   = require('archiver');
+const archiver = require('archiver');
+const mime     = require('mime-types');
+const { v4: uuidv4 } = require('uuid');
+const sqlite3  = require('sqlite3').verbose();
 const fileUpload = require('express-fileupload');
+const crypto     = require('crypto');
 
 const app    = express();
 const server = http.createServer(app);
@@ -62,6 +64,7 @@ function log(level, msg, meta = {}) {
   const lvl  = `${color}${C.bold}${label}${C.reset}`;
   const text = `${C.bold}${msg}${C.reset}`;
 
+
   // Format meta fields inline: key=value key2=value2
   const metaStr = Object.entries(meta)
     .filter(([, v]) => v !== undefined && v !== null && v !== '')
@@ -77,17 +80,16 @@ function log(level, msg, meta = {}) {
 
 // Shortcuts
 const logDebug = (msg, meta) => log('debug', msg, meta);
-const logInfo  = (msg, meta) => log('info',  msg, meta);
-const logWarn  = (msg, meta) => log('warn',  msg, meta);
-const logError = (msg, meta) => log('error', msg, meta);
 
 // ─────────────────────────────────────────────────────────────────
 // PROCESS HEALTH — catch anything that would silently crash/hang
 // ─────────────────────────────────────────────────────────────────
 process.on('uncaughtException', (err, origin) => {
-  log('error', 'UNCAUGHT EXCEPTION — process may be unstable', {
+  log('error', 'UNCAUGHT EXCEPTION — process may be unstable. Shutting down in 1s.', {
     origin, error: err.message, stack: err.stack ? err.stack.split('\n').slice(0,6).join(' | ') : ''
   });
+  // Perform emergency flush and exit. Standard best practice for stability.
+  setTimeout(() => process.exit(1), 1000);
 });
 
 process.on('unhandledRejection', (reason) => {
@@ -130,16 +132,242 @@ setInterval(() => {
   });
 }, 60_000).unref();
 
-const ROOT_PATH = process.env.ROOT_PATH || '/';
-const PORT      = process.env.PORT      || 9898;
-const ROOT      = ROOT_PATH.replace(/\/+$/, '') || '';
-const TRASH_DIR = path.join(ROOT || '/', '.nova_trash');
+const ROOT = path.resolve(process.env.ROOT_PATH || '/');
+const PORT = process.env.PORT || 9898;
+const TRASH_DIR = path.join(ROOT, '.nova_trash');
 
 // Gotify config (optional)
 const GOTIFY_URL   = (process.env.GOTIFY_URL   || '').trim();
 const GOTIFY_TOKEN = (process.env.GOTIFY_TOKEN || '').trim();
 
-if (!fs.existsSync(TRASH_DIR)) fs.mkdirSync(TRASH_DIR, { recursive: true });
+// Database initialization
+const dbFile = path.join(ROOT, '.nova.db');
+const db = new sqlite3.Database(dbFile);
+
+// Enable WAL (Write-Ahead Logging) for significantly better concurrency
+db.serialize(() => {
+  db.run("PRAGMA journal_mode=WAL");
+  db.run("PRAGMA synchronous=NORMAL");
+});
+
+// Helper for async queries
+const query = (sql, params = []) => new Promise((resolve, reject) => {
+  db.all(sql, params, (err, rows) => { if (err) reject(err); else resolve(rows); });
+});
+const run = (sql, params = []) => new Promise((resolve, reject) => {
+  db.run(sql, params, function(err) { if (err) reject(err); else resolve(this); });
+});
+
+(async () => {
+  try {
+    await run(`CREATE TABLE IF NOT EXISTS trash (
+      id TEXT PRIMARY KEY,
+      name TEXT,
+      originalPath TEXT,
+      trashPath TEXT,
+      deletedAt TEXT
+    )`);
+    await run(`CREATE TABLE IF NOT EXISTS embeddings (
+      filePath TEXT,
+      mtime INTEGER,
+      model TEXT,
+      embedding TEXT,
+      PRIMARY KEY (filePath, mtime, model)
+    )`);
+    await run(`CREATE TABLE IF NOT EXISTS jobs (
+      jobId TEXT PRIMARY KEY,
+      clientId TEXT,
+      type TEXT,
+      status TEXT,
+      percent INTEGER,
+      phase TEXT,
+      logs TEXT,
+      error TEXT,
+      data TEXT,
+      startedAt TEXT,
+      finishedAt TEXT
+    )`);
+
+    await run(`CREATE TABLE IF NOT EXISTS users (
+      username TEXT PRIMARY KEY,
+      password TEXT
+    )`);
+    
+    // Performance indexes
+    await run(`CREATE INDEX IF NOT EXISTS idx_embeddings_path ON embeddings(filePath)`);
+    await run(`CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)`);
+    await run(`CREATE INDEX IF NOT EXISTS idx_jobs_started ON jobs(startedAt DESC)`);
+
+    // ── CREDENTIALS ──────────────────────────────────────────
+    // MANDATORY: ADMIN_USER and ADMIN_PASS. If not set, generate a random one and log it, but warn.
+    const existing = await query(`SELECT * FROM users LIMIT 1`);
+    if (!existing.length) {
+      const ADMIN_USER = process.env.ADMIN_USER || 'admin';
+      const ADMIN_PASS = process.env.ADMIN_PASS || uuidv4().slice(0, 12);
+      
+      log('warn', '⚠️  INITIALIZING SECURE CREDENTIALS — PLEASE CHECK LOGS OR SET IN .env');
+      log('info', `### NOVO CREDENTIALS: user=${ADMIN_USER} pass=${ADMIN_PASS} ###`);
+      
+      const salt = crypto.randomBytes(16).toString('hex');
+      const hash = crypto.scryptSync(ADMIN_PASS, salt, 64).toString('hex');
+      await run(`INSERT INTO users (username, password) VALUES (?, ?)`, [ADMIN_USER, `${salt}.${hash}`]);
+    }
+
+    // ── RESUME/RESTORE JOBS ────────────────────────────────────
+    // Mark any interrupted 'running' jobs as 'cancelled' so they can be resumed
+    await run(`UPDATE jobs SET status = 'cancelled' WHERE status = 'running'`);
+    log('info', 'Recovered job states from database');
+    
+    // Seed in-memory jobs map with recent history
+    const recent = await query(`SELECT * FROM jobs ORDER BY startedAt DESC LIMIT 50`);
+    recent.forEach(r => {
+      jobs.set(r.jobId, {
+        ...r,
+        log: JSON.parse(r.logs || '[]'),
+        data: JSON.parse(r.data || '{}')
+      });
+    });
+    
+    // Migration: Migrate .meta.json to trash table (atomic startup migration)
+    const metaFile = path.join(TRASH_DIR, '.meta.json');
+    try {
+      await fs.promises.access(metaFile);
+      const meta = JSON.parse(await fs.promises.readFile(metaFile, 'utf8'));
+      log('info', `Migrating ${meta.length} trash items from .meta.json to database…`);
+      for (const item of meta) {
+        await run(`INSERT OR IGNORE INTO trash (id, name, originalPath, trashPath, deletedAt) VALUES (?, ?, ?, ?, ?)`, 
+                  [item.id, item.name, item.originalPath, item.trashPath, item.deletedAt]);
+      }
+      await fs.promises.rename(metaFile, metaFile + '.bak');
+      log('info', 'Trash migration complete.');
+    } catch (e) {
+      if (e.code !== 'ENOENT') log('error', 'Trash migration failed', { error: e.message });
+    }
+  } catch (e) { log('error', 'Database initialization failed', { error: e.message }); }
+})();
+
+// Ensure TRASH_DIR (async startup check)
+(async () => {
+  try { await fs.promises.access(TRASH_DIR); }
+  catch (e) { await fs.promises.mkdir(TRASH_DIR, { recursive: true }).catch(() => {}); }
+})();
+
+// ── Security Headers & CSRF ────────────────────────────────────
+const CSRF_SECRET = process.env.CSRF_SECRET || (() => {
+  log('warn', '⚠️  CSRF_SECRET not set in environment — generating volatile token (sessions will expire on restart)');
+  return crypto.randomBytes(32).toString('hex');
+})();
+const getCsrfToken = (ip, salt) => crypto.createHmac('sha256', CSRF_SECRET).update(`${ip}:${salt}`).digest('hex');
+
+// Authentication & Session Secrets
+const AUTH_SECRET = process.env.AUTH_SECRET || (() => {
+  log('warn', '⚠️  AUTH_SECRET not set in environment — generating volatile token (users will be logged out on restart)');
+  return crypto.randomBytes(32).toString('hex');
+})();
+const SESSION_COOKIE = 'nova_session';
+
+// ── Authentication & Cookie Helpers ──────────────────────────────
+/** Centralized cookie parser: handles multiple cookies and keeps values with '=' intact */
+function parseCookies(cookieHeader) {
+  return (cookieHeader || '').split(';').reduce((acc, c) => {
+    const idx = c.indexOf('=');
+    if (idx !== -1) acc[c.slice(0, idx).trim()] = c.slice(idx + 1);
+    return acc;
+  }, {});
+}
+
+/** Verifies session and returns user info (works for both Express and Node native requests) */
+function getAuthUser(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  return verifySession(cookies[SESSION_COOKIE]);
+}
+
+
+const hashPassword = (pw) => {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(pw, salt, 64).toString('hex');
+  return `${salt}.${hash}`;
+};
+
+const verifyPassword = (pw, combined) => {
+  if (!combined || !combined.includes('.')) return false;
+  const [salt, originalHash] = combined.split('.');
+  const candidateHash = crypto.scryptSync(pw, salt, 64).toString('hex');
+  return candidateHash === originalHash;
+};
+
+const signSession = (username) => {
+  const payload = JSON.stringify({ u: username, t: Date.now() });
+  const sig = crypto.createHmac('sha256', AUTH_SECRET).update(payload).digest('hex');
+  return `${Buffer.from(payload).toString('base64')}.${sig}`;
+};
+
+const verifySession = (token) => {
+  if (!token || !token.includes('.')) return null;
+  const [b64, sig] = token.split('.');
+  const payloadStr = Buffer.from(b64, 'base64').toString('utf8');
+  const expectedSig = crypto.createHmac('sha256', AUTH_SECRET).update(payloadStr).digest('hex');
+  if (sig !== expectedSig) return null;
+  const payload = JSON.parse(payloadStr);
+  // Optional: check expiration (e.g., 30 days max for 'remember me')
+  if (Date.now() - payload.t > 30 * 24 * 60 * 60 * 1000) return null;
+  return payload.u;
+};
+
+app.use((req, res, next) => {
+  // 1. Basic Security Headers
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  
+  // 2. CSRF Implementation
+  // We use a simple cookie + header approach. 
+  // The client reads the 'nova_csrf_token' cookie and sends it back in 'X-Nova-CSRF' header.
+  if (!req.headers.cookie || !req.headers.cookie.includes('nova_csrf_token=')) {
+    const salt = crypto.randomBytes(16).toString('hex');
+    const token = getCsrfToken(req.ip, salt);
+    const cookieVal = `${salt}.${token}`;
+    res.setHeader('Set-Cookie', `nova_csrf_token=${cookieVal}; Path=/; SameSite=Lax`);
+  }
+
+  // Validate CSRF for state-changing methods
+  const protectedMethods = ['POST', 'PUT', 'DELETE', 'PATCH'];
+  if (protectedMethods.includes(req.method)) {
+    const clientHeader = req.headers['x-nova-csrf'];
+    const cookies = parseCookies(req.headers.cookie);
+    const serverCookie = cookies['nova_csrf_token'];
+    
+    if (!clientHeader || !serverCookie || clientHeader !== serverCookie) {
+      log('warn', 'CSRF validation failed', { 
+        method: req.method, path: req.path, ip: req.ip,
+        hasHeader: !!clientHeader, hasCookie: !!serverCookie
+      });
+      return res.status(403).json({ error: 'CSRF validation failed' });
+    }
+  }
+  next();
+});
+
+const checkAuth = (req, res, next) => {
+  // Allow login/logout/health and public static assets without auth
+  const publicPaths = ['/api/login', '/api/logout', '/api/health'];
+  const isPublicAsset = req.path.match(/\.(png|svg|ico|json|js)$/) || req.path === '/favicon.svg';
+  
+  if (publicPaths.includes(req.path) || isPublicAsset) return next();
+  
+  const user = getAuthUser(req);
+  if (!user) {
+    if (req.path.startsWith('/api/')) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    // Serve login page for the main UI if not authenticated
+    return res.sendFile(path.join(__dirname, 'login.html'));
+  }
+  req.user = user;
+  next();
+};
+
+app.use(checkAuth);
 
 // ── Request logging middleware ─────────────────────────────────
 app.use((req, res, next) => {
@@ -165,16 +393,67 @@ app.use(express.static(path.join(__dirname, 'public')));
 // ─────────────────────────────────────────────────────────────────
 // PATH HELPERS
 // ─────────────────────────────────────────────────────────────────
-function resolvePath(p) {
+async function resolvePath(p, followSymlinks = false) {
   const normalized = path.normalize('/' + (p || '/')).replace(/\/\/+/g, '/');
   const result = ROOT + normalized;
+  
   // Path traversal guard: resolved path must still start with ROOT
   if (ROOT && !result.startsWith(ROOT)) {
     throw new Error(`Path traversal rejected: ${p}`);
   }
+
+  // Symlink escape protection (async check)
+  if (followSymlinks && ROOT) {
+    let curr = result;
+    // Check components from deepest to root to find first existing one
+    while (curr && curr.startsWith(ROOT)) {
+      try {
+        let real = await fs.promises.realpath(curr);
+        
+        // Host-root reconciliation for absolute symlinks in Docker
+        if (!real.startsWith(ROOT) && real.startsWith('/')) {
+          const hostReconciled = path.join(ROOT, real);
+          try {
+            if (fs.existsSync(hostReconciled)) {
+              real = await fs.promises.realpath(hostReconciled);
+            }
+          } catch (e) { /* ignore existsSync/realpath errors on hostReconciled */ }
+        }
+
+        if (!real.startsWith(ROOT)) {
+          throw new Error(`Symlink escape rejected: ${p} -> ${real}`);
+        }
+        break; 
+      } catch (e) {
+        if (e.code !== 'ENOENT') throw e;
+        const parent = path.dirname(curr);
+        if (parent === curr) break;
+        curr = parent;
+      }
+    }
+  }
+
+  // Final "Deep Seal" Sanity Check: resolve the base of the ROOT realpath
+  // and compare it to the resolved realpath target.
+  if (ROOT) {
+    try {
+      const rootReal = await fs.promises.realpath(ROOT);
+      const targetReal = await fs.promises.realpath(result);
+      if (!targetReal.startsWith(rootReal)) {
+        throw new Error(`Structural traversal rejected: ${p} -> ${targetReal}`);
+      }
+    } catch (e) {
+      if (e.code !== 'ENOENT') throw e;
+    }
+  }
+
   return result.length > ROOT.length + 1 && result.endsWith('/')
     ? result.replace(/\/$/, '') : result;
 }
+const isSubpath = (parent, child) => {
+  const relative = path.relative(parent, child);
+  return relative === '' || (relative && !relative.startsWith('..') && !path.isAbsolute(relative));
+};
 function toVirtual(abs) {
   if (ROOT === '') return abs || '/';
   if (abs.startsWith(ROOT)) {
@@ -189,32 +468,76 @@ function toVirtual(abs) {
 // ─────────────────────────────────────────────────────────────────
 const clients = new Map();
 
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
+  const cookies = parseCookies(req.headers.cookie);
+  const user = verifySession(cookies[SESSION_COOKIE]);
+  const csrfCookie = cookies['nova_csrf_token'];
+
+  // 1. Session check
+  if (!user) {
+    log('warn', 'Unauthorized WS connection rejected (no session)', { ip: req.socket.remoteAddress });
+    ws.close(1008, 'Authentication required');
+    return;
+  }
+
+  // 2. CSWSH / CSRF check
+  // The client must pass the CSRF token in the query string because browsers don't send custom headers on WS upgrades.
+  const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const clientToken = url.searchParams.get('token');
+
+  if (!csrfCookie || !clientToken || csrfCookie !== clientToken) {
+    log('warn', 'CSWSH / CSRF validation failed for WS connection', { 
+      ip: req.socket.remoteAddress, 
+      hasCookie: !!csrfCookie, 
+      hasToken: !!clientToken,
+      match: csrfCookie === clientToken
+    });
+    ws.close(1008, 'CSRF validation failed');
+    return;
+  }
+
   let clientId = null;
   ws.on('message', (data) => {
     try {
       const msg = JSON.parse(data);
       if (msg.type === 'register' && msg.clientId) {
         clientId = msg.clientId;
-        if (clients.has(clientId)) { try { clients.get(clientId).terminate(); } catch {} }
+        // If this clientId already has a connection, terminate the old one (last one wins)
+        if (clients.has(clientId)) {
+          const oldWs = clients.get(clientId);
+          if (oldWs !== ws) {
+            try { oldWs.terminate(); } catch (e) { /* ignore */ }
+          }
+        }
         clients.set(clientId, ws);
         ws.clientId = clientId;
+
         // Replay all running jobs for this client on reconnect
         for (const job of jobs.values()) {
           if (job.clientId === clientId && job.status === 'running') {
-            ws.send(JSON.stringify({ type: 'job_update', job: sanitizeJob(job) }));
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'job_update', job: sanitizeJob(job) }));
+            }
           }
         }
       }
-    } catch {}
+    } catch (e) {
+      logDebug('WS message parse failed', { error: e.message, data: String(data).slice(0, 64) });
+    }
   });
-  ws.on('close', () => { if (clientId) clients.delete(clientId); });
+
+  ws.on('close', () => {
+    // Only delete from clients map if THIS specific socket is the one registered
+    if (clientId && clients.get(clientId) === ws) {
+      clients.delete(clientId);
+    }
+  });
 });
 
 function broadcast(clientId, data) {
   const ws = clients.get(clientId);
   if (ws && ws.readyState === WebSocket.OPEN) {
-    try { ws.send(JSON.stringify(data)); } catch {}
+    try { ws.send(JSON.stringify(data)); } catch (e) { logDebug('WS broadcast failed', { clientId, error: e.message }); }
   }
 }
 
@@ -223,16 +546,72 @@ function broadcast(clientId, data) {
 // ─────────────────────────────────────────────────────────────────
 const jobs = new Map();
 
+// ── AUTH ROUTES ────────────────────────────────────────────────
+app.post('/api/login', async (req, res) => {
+  const { username, password, remember } = req.body;
+  if (!username || !password) return res.status(400).json({ error: 'Missing credentials' });
+
+  const rows = await query(`SELECT * FROM users WHERE username = ?`, [username]);
+  if (!rows.length || !verifyPassword(password, rows[0].password)) {
+    log('warn', 'Login failed', { username, ip: req.ip });
+    return res.status(401).json({ error: 'Invalid username or password' });
+  }
+
+  const token = signSession(username);
+  const maxAge = remember ? 30 * 24 * 60 * 60 * 1000 : null; // 30 days
+  const cookieOpts = `Path=/; SameSite=Lax; HttpOnly${maxAge ? `; Max-Age=${maxAge / 1000}` : ''}`;
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${token}; ${cookieOpts}`);
+  
+  log('info', 'User logged in', { username, remember, ip: req.ip });
+  res.json({ success: true, user: username });
+});
+
+app.post('/api/logout', async (req, res) => {
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`);
+  res.json({ success: true });
+});
+
+app.post('/api/account/update', checkAuth, async (req, res) => {
+  const { newUsername, newPassword } = req.body;
+  if (!newUsername && !newPassword) return res.status(400).json({ error: 'Nothing to update' });
+
+  const currentUsername = req.user;
+  try {
+    if (newUsername && newPassword) {
+      await run(`UPDATE users SET username = ?, password = ? WHERE username = ?`, [newUsername, hashPassword(newPassword), currentUsername]);
+      const token = signSession(newUsername);
+      res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${token}; Path=/; SameSite=Lax; HttpOnly`);
+    } else if (newUsername) {
+      await run(`UPDATE users SET username = ? WHERE username = ?`, [newUsername, currentUsername]);
+      const token = signSession(newUsername);
+      res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${token}; Path=/; SameSite=Lax; HttpOnly`);
+    } else if (newPassword) {
+      await run(`UPDATE users SET password = ? WHERE username = ?`, [hashPassword(newPassword), currentUsername]);
+    }
+
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 function createJob(type, clientId, meta = {}) {
   const jobId = uuidv4();
   const job   = {
     jobId, type, clientId,
-    status: 'running', percent: 0, filePercent: 0,
+    status: 'running', percent: 0, filePercent: 0, lastSyncedPercent: 0,
     phase: 'starting', currentFile: '', log: [],
     startedAt: new Date().toISOString(), finishedAt: null,
     ...meta
   };
   jobs.set(jobId, job);
+  
+  // Persist to DB
+  run(`INSERT INTO jobs (jobId, clientId, type, status, percent, phase, logs, error, data, startedAt, finishedAt)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [jobId, clientId, type, job.status, job.percent, job.phase, JSON.stringify(job.log), job.error || null, JSON.stringify(meta), job.startedAt, job.finishedAt])
+      .catch(e => log('error', 'Failed to persist job creation', { jobId, error: e.message }));
+
   log('info', 'Job created', { jobId, type, operation: meta.operation || null, sources: (meta.sources||[]).length, dest: meta.destination || null });
 
   // Gotify: notify job started
@@ -257,6 +636,20 @@ function createJob(type, clientId, meta = {}) {
 function updateJob(job, updates) {
   Object.assign(job, updates);
   broadcast(job.clientId, { type: 'job_update', job: sanitizeJob(job) });
+
+  // Sync to DB on major updates or periodically
+  const isFinal = ['done', 'error', 'cancelled'].includes(updates.status);
+  if (isFinal) {
+    run(`UPDATE jobs SET status = ?, percent = ?, phase = ?, logs = ?, error = ?, finishedAt = ? WHERE jobId = ?`,
+        [job.status, job.percent, job.phase, JSON.stringify(job.log), job.error || null, job.finishedAt || new Date().toISOString(), job.jobId])
+        .catch(e => log('error', 'Failed to persist job final state', { jobId: job.jobId, error: e.message }));
+  } else if (updates.percent !== undefined && Math.abs(updates.percent - (job.lastSyncedPercent || 0)) >= 5) {
+    // Throttled sync for progress — sync every 5% jump
+    job.lastSyncedPercent = updates.percent;
+    run(`UPDATE jobs SET percent = ?, phase = ?, logs = ? WHERE jobId = ?`,
+        [job.percent, job.phase, JSON.stringify(job.log), job.jobId])
+        .catch(e => logDebug('Job progress persist throttled fail', { jobId: job.jobId, error: e.message }));
+  }
 
   if (updates.status === 'done') {
     log('info', 'Job done', { jobId: job.jobId, type: job.type, operation: job.operation || null, errorCount: job.errorCount || 0 });
@@ -297,6 +690,12 @@ function updateJob(job, updates) {
   }
 }
 
+function addJobLog(job, msg) {
+  if (!job.log) job.log = [];
+  job.log.push(msg);
+  if (job.log.length > 100) job.log.shift(); // Constant memory cap
+}
+
 function sanitizeJob(job) {
   return {
     jobId: job.jobId, type: job.type, status: job.status,
@@ -305,7 +704,8 @@ function sanitizeJob(job) {
     startedAt: job.startedAt, finishedAt: job.finishedAt,
     operation: job.operation, sources: job.sources,
     destination: job.destination, error: job.error,
-    log: (job.log || []).slice(-50)
+    // Truncate logs for real-time updates to minimize network load
+    log: (job.log || []).slice(-20)
   };
 }
 
@@ -367,38 +767,72 @@ function notifyGotify(title, message, priority = 5) {
 // ─────────────────────────────────────────────────────────────────
 // ROUTES — read-only ops
 // ─────────────────────────────────────────────────────────────────
-app.get('/api/jobs',   (req, res) => res.json({ jobs: [...jobs.values()].map(sanitizeJob) }));
-app.get('/api/health', (req, res) => res.json({
+app.get('/api/jobs', async (req, res) => {
+  try {
+    const historical = await query(`SELECT * FROM jobs ORDER BY startedAt DESC LIMIT 200`);
+    const formatted = historical.map(row => {
+      // If the job is currently active in memory, prefer the memory state
+      if (jobs.has(row.jobId)) return sanitizeJob(jobs.get(row.jobId));
+      
+      let data = {}; try { data = JSON.parse(row.data); } catch(e) { logDebug('Job data parse failed', { jobId: row.jobId, error: e.message }); }
+      let log  = []; try { log  = JSON.parse(row.logs); } catch(e) { logDebug('Job logs parse failed', { jobId: row.jobId, error: e.message }); }
+      
+      return {
+        ...data,
+        jobId: row.jobId, type: row.type, clientId: row.clientId,
+        status: row.status, percent: row.percent, phase: row.phase,
+        error: row.error, startedAt: row.startedAt, finishedAt: row.finishedAt,
+        log: log.slice(-50)
+      };
+    });
+    res.json({ jobs: formatted });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+app.get('/api/health', async (req, res) => res.json({
   status: 'ok',
   uptime: Math.round(process.uptime()),
   runningJobs: [...jobs.values()].filter(j => j.status === 'running').length,
   pid: process.pid
 }));
 
-app.get('/api/list', (req, res) => {
-  const dir = resolvePath(req.query.path || '/');
+app.get('/api/list', async (req, res) => {
   try {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    const files = entries
-      .filter(e => e.name !== '.nova_trash')
-      .map(e => {
+    const showHidden = (req.query.showHidden === 'true');
+    const dir = await resolvePath(req.query.path || '/', true); 
+    const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    
+    const filePromises = entries
+      .filter(e => {
+        if (e.name === '.nova_trash') return false;
+        if (e.name === '.nova.db' || e.name.startsWith('.nova_edit_') || e.name.startsWith('.nova_xfr_')) return false;
+        if (!showHidden && e.name.startsWith('.') && e.name !== '..') return false;
+        return true;
+      })
+      .map(async (e) => {
         const fullPath = path.join(dir, e.name);
         const isSymlink = e.isSymbolicLink();
 
-        // lstat = info about the link itself; stat = info about the target
         let lstStat = {}, tgtStat = null, linkTarget = null, brokenLink = false;
-        try { lstStat = fs.lstatSync(fullPath); } catch {}
+        try { lstStat = await fs.promises.lstat(fullPath); } catch (e2) { logDebug('lstat failed', { path: fullPath, error: e2.message }); }
 
         if (isSymlink) {
-          try { linkTarget = fs.readlinkSync(fullPath); } catch {}
+          try { linkTarget = await fs.promises.readlink(fullPath); } catch (e2) { /* ignore */ }
           try {
-            tgtStat = fs.statSync(fullPath); // follows the link
+            tgtStat = await fs.promises.stat(fullPath); 
           } catch {
-            brokenLink = true; // target doesn't exist or is a loop
+            // Try host-root reconciliation for broken/absolute links
+            if (linkTarget && linkTarget.startsWith('/') && !linkTarget.startsWith(ROOT)) {
+              const hostTarget = path.join(ROOT, linkTarget);
+              try {
+                tgtStat = await fs.promises.stat(hostTarget);
+                brokenLink = false;
+              } catch { brokenLink = true; }
+            } else {
+              brokenLink = true;
+            }
           }
         }
 
-        // For type resolution: follow the link to see if target is a dir
         const statToUse = tgtStat || lstStat;
         const isDir  = isSymlink ? (!brokenLink && tgtStat?.isDirectory()) : e.isDirectory();
         const type   = isSymlink ? (brokenLink ? 'symlink-broken' : isDir ? 'symlink-dir' : 'symlink-file') :
@@ -413,27 +847,33 @@ app.get('/api/list', (req, res) => {
           brokenLink:  brokenLink || false,
           size:        statToUse.size  || 0,
           modified:    statToUse.mtime || null,
-          mime:        isDir ? null : (mime.lookup(e.name) || 'application/octet-stream'),
+          mime:        isDir ? null : (mime.lookup(isSymlink ? (linkTarget || e.name) : e.name) || 'application/octet-stream'),
           permissions: lstStat.mode ? (lstStat.mode & 0o777).toString(8) : '---'
         };
       });
+    const files = await Promise.all(filePromises);
     res.json({ path: toVirtual(dir), entries: files });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { 
+    res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message }); 
+  }
 });
 
-app.get('/api/trash', (req, res) => {
+app.get('/api/trash', async (req, res) => {
   try {
-    const metaFile = path.join(TRASH_DIR, '.meta.json');
-    const meta = fs.existsSync(metaFile) ? JSON.parse(fs.readFileSync(metaFile)) : [];
-    res.json({ items: meta });
+    const items = await query(`SELECT * FROM trash ORDER BY deletedAt DESC`);
+    res.json({ items });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-app.get('/api/diskinfo', (req, res) => {
+app.get('/api/diskinfo', async (req, res) => {
   const target = ROOT || '/';
-  exec(`df -B1 "${target}" | tail -1 | awk '{print $2,$3,$4}'`, (err, stdout) => {
+  execFile('df', ['-B1', target], (err, stdout) => {
     if (err) return res.status(500).json({ error: err.message });
-    const [total, used, avail] = stdout.trim().split(' ').map(Number);
+    const lines = stdout.trim().split('\n');
+    if (lines.length < 2) return res.status(500).json({ error: 'Unexpected df output' });
+    const cols = lines[1].trim().split(/\s+/);
+    if (cols.length < 4) return res.status(500).json({ error: 'Invalid df output format' });
+    const [total, used, avail] = [cols[1], cols[2], cols[3]].map(Number);
     res.json({ total, used, avail });
   });
 });
@@ -449,7 +889,7 @@ app.get('/api/diskinfo', (req, res) => {
 //   5. Deduplicate: run df and group by the REAL underlying device df reports —
 //      if /home, /srv, /tmp all sit on the same /dev/sda1 they become one entry
 //      and we pick the most descriptive mountpoint (prefer /mnt, /media, shortest)
-app.get('/api/mounts', (req, res) => {
+app.get('/api/mounts', async (req, res) => {
   const NETWORK_FS = new Set(['nfs','nfs4','cifs','smbfs','davfs','fuse.sshfs',
     'fuse.rclone','fuse.encfs','fuse.s3fs','glusterfs','cephfs','lustre','beegfs']);
   const SKIP_FS    = new Set(['proc','sysfs','devtmpfs','devpts','tmpfs','cgroup',
@@ -486,33 +926,35 @@ app.get('/api/mounts', (req, res) => {
 
     if (!raw.length) return res.json({ mounts: [] });
 
-    // Use df to get real device names + usage — portable awk (works on Alpine/BusyBox too)
-    // Build args safely: each mountpoint single-quoted, internal quotes escaped
-    const safeArgs = raw.map(m => `'${m.mountpoint.replace(/'/g, "'\"'\"'")}'`).join(' ');
-    exec(`df -B1 ${safeArgs} 2>/dev/null | awk 'NR>1{dev=$1; sz=$2; used=$3; av=$4; mp=""; for(i=6;i<=NF;i++) mp=mp (i>6?" ":"") $i; print dev,sz,used,av,mp}'`, (err2, stdout) => {
-      // Build map: real-device → best entry (dedup drives mounted at multiple paths)
+    // Command injection protection: use execFile with an argument array
+    const args = ['-B1', ...raw.map(m => m.mountpoint)];
+    
+    execFile('df', args, (dfErr, dfOut) => {
+      if (dfErr || !dfOut) return res.json({ mounts: [] });
+
       const byDevice = new Map();
-      if (!err2 && stdout) {
-        for (const line of stdout.trim().split('\n')) {
-          if (!line.trim()) continue;
-          const cols = line.trim().split(/\s+/);
-          if (cols.length < 5) continue;
-          const [dfDev, total, used, avail, ...mpParts] = cols;
-          const mp   = mpParts.join(' ');
-          const size = +total;
-          if (!size || size < 1) continue;           // skip 0-byte virtual mounts
-          const meta = raw.find(r => r.mountpoint === mp) || {};
-          const entry = { device: dfDev, mountpoint: mp, fstype: meta.fstype || '',
-                          total: size, used: +used, avail: +avail };
-          // Dedup: if same underlying device seen before, prefer /mnt or /media paths,
-          // else prefer the one with the shortest / most descriptive mountpoint
-          if (!byDevice.has(dfDev)) {
-            byDevice.set(dfDev, entry);
-          } else {
-            const prev = byDevice.get(dfDev);
-            const score = mp => (mp.startsWith('/mnt')||mp.startsWith('/media')) ? 0 : mp.length;
-            if (score(mp) < score(prev.mountpoint)) byDevice.set(dfDev, entry);
-          }
+      const lines = dfOut.trim().split('\n').slice(1); // skip header
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        const cols = line.trim().split(/\s+/);
+        if (cols.length < 6) continue;
+        const dfDev = cols[0];
+        const total = +cols[1];
+        const used  = +cols[2];
+        const avail = +cols[3];
+        const mp    = cols.slice(5).join(' '); // Reconstruct mountpoint with spaces
+        
+        if (!total || total < 1) continue;
+        const meta = raw.find(r => r.mountpoint === mp) || {};
+        const entry = { device: dfDev, mountpoint: mp, fstype: meta.fstype || '',
+                        total, used, avail };
+                        
+        if (!byDevice.has(dfDev)) {
+          byDevice.set(dfDev, entry);
+        } else {
+          const prev = byDevice.get(dfDev);
+          const score = mp => (mp.startsWith('/mnt')||mp.startsWith('/media')) ? 0 : mp.length;
+          if (score(mp) < score(prev.mountpoint)) byDevice.set(dfDev, entry);
         }
       }
 
@@ -520,27 +962,35 @@ app.get('/api/mounts', (req, res) => {
         .filter(m => m.total > 0)
         .map(m => ({
           ...m,
-          // Strip ROOT prefix so client nav() calls work correctly (resolvePath re-adds ROOT)
           mountpoint: toVirtual(m.mountpoint),
           label: m.mountpoint.split('/').filter(Boolean).pop()
                  || path.basename(m.device) || m.device
         }))
-        .sort((a,b) => b.total - a.total);   // largest drive first
+        .sort((a,b) => b.total - a.total);
 
       res.json({ mounts });
     });
   });
 });
-app.get('/api/stat', (req, res) => {
-  const p = resolvePath(req.query.path);
+app.get('/api/stat', async (req, res) => {
   try {
-    const lst  = fs.lstatSync(p);                          // info about link itself
+    const p = await resolvePath(req.query.path, true);
+    const lst = await fs.promises.lstat(p); // info about link itself
     const isSymlink = lst.isSymbolicLink();
     let stat = lst, linkTarget = null, brokenLink = false;
     if (isSymlink) {
-      try { linkTarget = fs.readlinkSync(p); } catch {}
-      try { stat = fs.statSync(p); }                       // follow to target
-      catch { brokenLink = true; stat = lst; }
+      try { linkTarget = await fs.promises.readlink(p); } catch (e) { logDebug('readlink failed', { path: p, error: e.message }); }
+      try {
+        stat = await fs.promises.stat(p); // follow to target
+        if (ROOT && !stat.isDirectory()) {
+          // Verify that the link target is also inside ROOT
+          const real = await fs.promises.realpath(p);
+          if (!real.startsWith(ROOT)) throw new Error(`Forbidden: Symlink escape rejected`);
+        }
+      } catch (e) {
+        if (e.message.includes('Forbidden')) throw e;
+        brokenLink = true; stat = lst;
+      }
     }
     res.json({
       name:        path.basename(p),
@@ -555,83 +1005,133 @@ app.get('/api/stat', (req, res) => {
       brokenLink:  brokenLink || false,
       mime:        mime.lookup(p) || null
     });
-  } catch (err) { res.status(err.code === 'ENOENT' ? 404 : 500).json({ error: err.message }); }
+  } catch (err) { res.status(err.message.includes('Symlink escape') || err.message.includes('traversal') ? 403 : err.code === 'ENOENT' ? 404 : 500).json({ error: err.message }); }
 });
 
-app.get('/api/preview', (req, res) => {
-  const p = resolvePath(req.query.path);
-  res.setHeader('Content-Type', mime.lookup(p) || 'application/octet-stream');
-  fs.createReadStream(p).pipe(res);
-});
-
-app.get('/api/download', (req, res) => {
-  const p = resolvePath(req.query.path);
-  let stat;
-  try { stat = fs.statSync(p); } catch (e) { return res.status(404).json({ error: e.message }); }
-  if (stat.isDirectory()) {
-    res.setHeader('Content-Disposition', `attachment; filename="${path.basename(p)}.zip"`);
-    res.setHeader('Content-Type', 'application/zip');
-    const archive = archiver('zip', { zlib: { level: 6 } });
-    archive.pipe(res);
-    archive.directory(p, path.basename(p));
-    archive.finalize();
-  } else {
-    res.download(p);
+app.get('/api/preview', async (req, res) => {
+  try {
+    const p = await resolvePath(req.query.path, true); // true = follow and verify symlink
+    res.setHeader('Content-Type', mime.lookup(p) || 'application/octet-stream');
+    fs.createReadStream(p).pipe(res);
+  } catch (err) {
+    res.status(err.message.includes('Symlink escape') || err.message.includes('traversal') ? 403 : 404).send(err.message);
   }
+});
+
+app.get('/api/download', async (req, res) => {
+  try {
+    const p = await resolvePath(req.query.path, true);
+    let stat;
+    try { stat = await fs.promises.stat(p); } catch (e) { return res.status(404).json({ error: e.message }); }
+    if (stat.isDirectory()) {
+      res.setHeader('Content-Disposition', `attachment; filename="${path.basename(p)}.zip"`);
+      res.setHeader('Content-Type', 'application/zip');
+      const archive = archiver('zip', { zlib: { level: 6 } });
+      archive.pipe(res);
+      archive.directory(p, path.basename(p));
+      archive.finalize();
+    } else {
+      res.download(p);
+    }
+  } catch (err) { res.status(err.message.includes('Symlink escape') ? 403 : 404).json({ error: err.message }); }
 });
 
 // ─────────────────────────────────────────────────────────────────
 // ROUTES — instant ops (these are atomic/fast enough to be sync)
 // ─────────────────────────────────────────────────────────────────
-app.post('/api/mkdir', (req, res) => {
-  const { path: p, name } = req.body;
-  if (!name || name.includes('/') || name.includes('\\') || name === '.' || name === '..')
-    return res.status(400).json({ error: 'Invalid folder name' });
+app.post('/api/mkdir', async (req, res) => {
   try {
-    fs.mkdirSync(path.join(resolvePath(p), name), { recursive: true });
+    const { path: p, name } = req.body;
+    if (!name || name.includes('/') || name.includes('\\') || name === '.' || name === '..')
+      return res.status(400).json({ error: 'Invalid folder name' });
+    const parent = await resolvePath(p, true);
+    const full = path.join(parent, name);
+    await fs.promises.mkdir(full, { recursive: true });
+    log('info', 'Directory created', { path: toVirtual(full), clientId: (req.body.clientId || '').slice(0, 12) });
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message }); }
 });
 
-app.post('/api/rename', (req, res) => {
-  const { oldPath, newName } = req.body;
-  if (!newName || newName.includes('/') || newName.includes('\\') || newName === '.' || newName === '..')
-    return res.status(400).json({ error: 'Invalid name' });
-  const abs = resolvePath(oldPath);
+app.post('/api/rename', async (req, res) => {
   try {
-    fs.renameSync(abs, path.join(path.dirname(abs), newName));
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    const { oldPath, newName } = req.body;
+    if (!newName || newName.includes('/') || newName.includes('\\') || newName === '.' || newName === '..')
+      return res.status(400).json({ error: 'Invalid name' });
+    
+    const abs = await resolvePath(oldPath, true);
+    const dir = path.dirname(abs);
+    const oldName = path.basename(abs);
+    let dest = path.join(dir, newName);
+
+    // Conflict resolution: if destination exists and it's not a case-only rename, find a free name
+    if (fs.existsSync(dest) && oldName.toLowerCase() !== newName.toLowerCase()) {
+      dest = await findFreeName(dest);
+    }
+
+    // case-only rename trick (a.txt -> A.txt) for case-insensitive filesystems
+    try {
+      if (oldName.toLowerCase() === newName.toLowerCase() && oldName !== newName) {
+        const tmp = dest + '.' + uuidv4().slice(0, 8) + '.tmp';
+        await fs.promises.rename(abs, tmp);
+        await fs.promises.rename(tmp, dest);
+      } else {
+        await fs.promises.rename(abs, dest);
+      }
+    } finally {
+      releaseName(dest);
+    }
+    
+    log('info', 'Renamed/Moved', { from: toVirtual(abs), to: toVirtual(dest), clientId: (req.body.clientId || '').slice(0, 12) });
+    res.json({ success: true, newName: path.basename(dest) });
+  } catch (err) { res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message }); }
 });
 
-app.post('/api/chmod', (req, res) => {
-  const { path: p, mode } = req.body;
-  const abs = resolvePath(p);
-  if (mode === undefined || mode === null)
-    return res.status(400).json({ error: 'Missing mode' });
-  const modeNum = parseInt(String(mode), 8);
-  if (isNaN(modeNum) || modeNum < 0 || modeNum > 0o777)
-    return res.status(400).json({ error: 'Invalid mode' });
+app.post('/api/chmod', async (req, res) => {
   try {
-    fs.chmodSync(abs, modeNum);
+    const { path: p, mode } = req.body;
+    const abs = await resolvePath(p, true);
+    
+    // Security Guard: refusing chmod on symlinks to prevent accidental out-of-root target modification
+    const lst = await fs.promises.lstat(abs);
+    if (lst.isSymbolicLink()) {
+      return res.status(400).json({ error: 'Cannot change permissions of symbolic links (security guard)' });
+    }
+
+    if (mode === undefined || mode === null)
+      return res.status(400).json({ error: 'Missing mode' });
+    const modeNum = parseInt(String(mode), 8);
+    if (isNaN(modeNum) || modeNum < 0 || modeNum > 0o777)
+      return res.status(400).json({ error: 'Invalid mode' });
+    await fs.promises.chmod(abs, modeNum);
+    log('info', 'Permissions changed', { path: toVirtual(abs), mode: mode.toString(8), clientId: (req.body.clientId || '').slice(0, 12) });
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message }); }
 });
 
-app.post('/api/trash/restore', (req, res) => {
-  const { id } = req.body;
-  const metaFile = path.join(TRASH_DIR, '.meta.json');
-  let meta = fs.existsSync(metaFile) ? JSON.parse(fs.readFileSync(metaFile)) : [];
-  const item = meta.find(m => m.id === id);
-  if (!item) return res.status(404).json({ error: 'Not found' });
-  const dest = resolvePath(item.originalPath);
+app.post('/api/trash/restore', async (req, res) => {
   try {
-    fs.mkdirSync(path.dirname(dest), { recursive: true });
-    fs.renameSync(item.trashPath, dest);
-    meta = meta.filter(m => m.id !== id);
-    fs.writeFileSync(metaFile, JSON.stringify(meta));
-    res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    const { id } = req.body;
+    const rows = await query(`SELECT * FROM trash WHERE id = ?`, [id]);
+    const item = rows[0];
+    if (!item) return res.status(404).json({ error: 'Not found' });
+    
+    let dest = await resolvePath(item.originalPath, true);
+    // Conflict resolution: if destination exists, find a free name
+    if (fs.existsSync(dest)) {
+      dest = await findFreeName(dest);
+    }
+
+    try {
+      await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+      await fs.promises.rename(item.trashPath, dest);
+    } finally {
+      releaseName(dest);
+    }
+    await run(`DELETE FROM trash WHERE id = ?`, [id]);
+    
+    log('info', 'Trash item restored', { from: item.trashPath, to: toVirtual(dest), clientId: (req.body.clientId || '').slice(0, 12) });
+    res.json({ success: true, restoredPath: toVirtual(dest) });
+  } catch (err) { res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message }); }
 });
 
 // ─────────────────────────────────────────────────────────────────
@@ -786,25 +1286,44 @@ function ledgerSetState(ledger, destAbs, state) {
 }
 
 async function flushLedger(ledgerPath, ledger) {
-  try { await fs.promises.writeFile(ledgerPath, JSON.stringify(ledger)); } catch {}
+  try { await fs.promises.writeFile(ledgerPath, JSON.stringify(ledger)); } catch (e) { logDebug('flushLedger failed', { path: ledgerPath, error: e.message }); }
 }
 
 // ── Conflict helpers ────────────────────────────────────────────
+// Atomic in-memory lock to prevent two simultaneous operations from claiming the same "free" name
+const PENDING_NAMES = new Set();
 
 /** Returns a path that doesn't exist yet by appending (2), (3)... before the extension.
  *  Uses async fs.promises.access so it doesn't block the event loop. */
 async function findFreeName(destPath) {
-  try { await fs.promises.access(destPath); } catch { return destPath; } // doesn't exist — use as-is
+  const check = async (p) => {
+    if (PENDING_NAMES.has(p)) return false;
+    try { await fs.promises.access(p); return false; }
+    catch { return true; }
+  };
+
+  if (await check(destPath)) { PENDING_NAMES.add(destPath); return destPath; }
+
   const dir  = path.dirname(destPath);
   const ext  = path.extname(destPath);
   const base = path.basename(destPath, ext);
   let n = 2;
   while (n < 10000) {
     const candidate = path.join(dir, `${base} (${n})${ext}`);
-    try { await fs.promises.access(candidate); n++; } catch { return candidate; }
+    if (await check(candidate)) {
+      PENDING_NAMES.add(candidate);
+      return candidate;
+    }
+    n++;
   }
-  return path.join(dir, `${base} (${Date.now()})${ext}`);
+  const final = path.join(dir, `${base} (${Date.now()})${ext}`);
+  PENDING_NAMES.add(final);
+  return final;
 }
+
+/** Release a previously claimed name so others can use it if the op finishes or fails. */
+function releaseName(p) { if (p) PENDING_NAMES.delete(p); }
+
 
 // ── API routes ───────────────────────────────────────────────────
 
@@ -812,80 +1331,84 @@ async function findFreeName(destPath) {
 // Returns a list of destination paths that already exist so the
 // client can ask the user what to do before any files move.
 app.post('/api/transfer/check', async (req, res) => {
-  const { sources, destination } = req.body;
-  if (!sources?.length || !destination)
-    return res.status(400).json({ error: 'Missing sources or destination' });
+  try {
+    const { sources, destination } = req.body;
+    if (!sources?.length || !destination)
+      return res.status(400).json({ error: 'Missing sources or destination' });
 
-  const destAbs   = resolvePath(destination);
-  const conflicts = [];
+    const destAbs   = await resolvePath(destination, true);
+    const conflicts = [];
 
-  for (const src of sources) {
-    const srcAbs  = resolvePath(src);
-    const srcName = path.basename(srcAbs);
-    let   srcStat;
-    try { srcStat = await fs.promises.stat(srcAbs); } catch { continue; }
+    for (const src of sources) {
+      const srcAbs  = await resolvePath(src, true);
+      const srcName = path.basename(srcAbs);
+      let   srcStat;
+      try { srcStat = await fs.promises.stat(srcAbs); } catch { continue; }
 
-    if (srcStat.isDirectory()) {
-      // Walk the source tree and check each file at its dest path
-      for await (const entry of walkDir(srcAbs, srcName)) {
-        const dstPath = path.join(destAbs, entry.relPath);
+      if (srcStat.isDirectory()) {
+        // Walk the source tree and check each file at its dest path
+        for await (const entry of walkDir(srcAbs, srcName)) {
+          const dstPath = path.join(destAbs, entry.relPath);
+          try {
+            const dstStat = await fs.promises.stat(dstPath);
+            let srcFileStat;
+            try { srcFileStat = await fs.promises.stat(entry.srcAbs); } catch { srcFileStat = srcStat; }
+            conflicts.push({
+              name:     entry.relPath,
+              srcPath:  src,
+              destPath: toVirtual(dstPath),
+              srcSize:  srcFileStat.size,
+              dstSize:  dstStat.size,
+              srcMtime: srcFileStat.mtime,
+              dstMtime: dstStat.mtime,
+              isDir:    false
+            });
+          } catch (e) { /* dest doesn't exist — no conflict */ }
+          // Cap at 500 conflicts to avoid hanging the browser on massive trees
+          if (conflicts.length >= 500) break;
+        }
+      } else {
+        const dstPath = path.join(destAbs, srcName);
         try {
           const dstStat = await fs.promises.stat(dstPath);
-          let srcFileStat;
-          try { srcFileStat = await fs.promises.stat(entry.srcAbs); } catch { srcFileStat = srcStat; }
           conflicts.push({
-            name:     entry.relPath,
+            name:     srcName,
             srcPath:  src,
             destPath: toVirtual(dstPath),
-            srcSize:  srcFileStat.size,
+            srcSize:  srcStat.size,
             dstSize:  dstStat.size,
-            srcMtime: srcFileStat.mtime,
+            srcMtime: srcStat.mtime,
             dstMtime: dstStat.mtime,
             isDir:    false
           });
-        } catch {} // dest doesn't exist — no conflict
-        // Cap at 500 conflicts to avoid hanging the browser on massive trees
-        if (conflicts.length >= 500) break;
+        } catch (e) { /* dest doesn't exist — no conflict */ }
       }
-    } else {
-      const dstPath = path.join(destAbs, srcName);
-      try {
-        const dstStat = await fs.promises.stat(dstPath);
-        conflicts.push({
-          name:     srcName,
-          srcPath:  src,
-          destPath: toVirtual(dstPath),
-          srcSize:  srcStat.size,
-          dstSize:  dstStat.size,
-          srcMtime: srcStat.mtime,
-          dstMtime: dstStat.mtime,
-          isDir:    false
-        });
-      } catch {}
+      if (conflicts.length >= 500) break;
     }
-    if (conflicts.length >= 500) break;
-  }
 
-  res.json({ conflicts, truncated: conflicts.length >= 500 });
+    res.json({ conflicts, truncated: conflicts.length >= 500 });
+  } catch (err) { res.status(err.message.includes('Symlink escape') || err.message.includes('traversal') ? 403 : 500).json({ error: err.message }); }
 });
 
-app.post('/api/transfer', (req, res) => {
-  const { sources, destination, operation, clientId, conflictResolutions } = req.body;
-  if (!sources?.length || !destination)
-    return res.status(400).json({ error: 'Missing sources or destination' });
-  log('info', 'Transfer requested', {
-    operation, sources: sources.length, destination,
-    clientId: (clientId || '').slice(0, 12),
-    conflicts_resolved: conflictResolutions ? Object.keys(conflictResolutions).length : 0
-  });
-  const destAbs = resolvePath(destination);
-  // conflictResolutions: { [destVirtualPath]: 'overwrite' | 'skip' | 'keepboth' }
-  const job = createJob('transfer', clientId, { operation, sources, destination, phase: 'starting' });
-  res.json({ jobId: job.jobId, started: true });
-  setImmediate(() => runTransfer(job, sources, destAbs, operation, null, null, conflictResolutions || {}));
+app.post('/api/transfer', async (req, res) => {
+  try {
+    const { sources, destination, operation, clientId, conflictResolutions } = req.body;
+    if (!sources?.length || !destination)
+      return res.status(400).json({ error: 'Missing sources or destination' });
+    log('info', 'Transfer requested', {
+      operation, sources: sources.length, destination,
+      clientId: (clientId || '').slice(0, 12),
+      conflicts_resolved: conflictResolutions ? Object.keys(conflictResolutions).length : 0
+    });
+    const destAbs = await resolvePath(destination, true);
+    // conflictResolutions: { [destVirtualPath]: 'overwrite' | 'skip' | 'keepboth' }
+    const job = createJob('transfer', clientId, { operation, sources, destination, phase: 'starting' });
+    res.json({ jobId: job.jobId, started: true });
+    setImmediate(() => runTransfer(job, sources, destAbs, operation, null, null, conflictResolutions || {}));
+  } catch (err) { res.status(err.message.includes('Symlink escape') || err.message.includes('traversal') ? 403 : 500).json({ error: err.message }); }
 });
 
-app.post('/api/transfer/cancel', (req, res) => {
+app.post('/api/transfer/cancel', async (req, res) => {
   const { jobId } = req.body;
   const job = jobs.get(jobId);
   if (!job || job.status !== 'running')
@@ -903,24 +1426,29 @@ app.post('/api/transfer/resume', async (req, res) => {
   let ledgerPath = null;
   const existingJob = jobs.get(jobId);
   if (existingJob?.destination) {
-    const c = path.join(resolvePath(existingJob.destination), `.nova_xfr_${jobId}.json`);
-    if (fs.existsSync(c)) ledgerPath = c;
+    const c = path.join(await resolvePath(existingJob.destination, true), `.nova_xfr_${jobId}.json`);
+    try { await fs.promises.access(c); ledgerPath = c; } catch (e) { /* not found in specific dest */ }
   }
   if (!ledgerPath) {
-    // Use async exec so we don't block the event loop during ledger search
     ledgerPath = await new Promise((resolve) => {
-      exec(
-        `find "${ROOT || '/'}" -maxdepth 10 -name ".nova_xfr_${jobId}.json" 2>/dev/null | head -1`,
+      execFile(
+        'find', [ROOT || '/', '-maxdepth', '10', '-name', `.nova_xfr_${jobId}.json`],
         { timeout: 15000 },
-        (err, stdout) => resolve((stdout || '').trim() || null)
+        (err, stdout) => {
+          const lines = (stdout || '').trim().split('\n');
+          resolve(lines[0] || null);
+        }
       );
     });
   }
-  if (!ledgerPath || !fs.existsSync(ledgerPath))
+  if (!ledgerPath)
     return res.status(404).json({ error: 'No resumable transfer found for this jobId' });
 
+  try { await fs.promises.access(ledgerPath); }
+  catch { return res.status(404).json({ error: 'Ledger file no longer exists or is unreadable' }); }
+
   let ledger;
-  try { ledger = JSON.parse(fs.readFileSync(ledgerPath)); }
+  try { ledger = JSON.parse(await fs.promises.readFile(ledgerPath, 'utf8')); }
   catch { return res.status(500).json({ error: 'Corrupt ledger file' }); }
 
   const pending = Object.entries(ledger.files).filter(([, s]) => s !== 'done').length;
@@ -934,8 +1462,8 @@ app.post('/api/transfer/resume', async (req, res) => {
     resumedFrom: jobId
   });
   res.json({ jobId: resumeJob.jobId, started: true, pendingFiles: pending });
-  setImmediate(() => runTransfer(
-    resumeJob, null, resolvePath(ledger.destination),
+  setImmediate(async () => runTransfer(
+    resumeJob, null, await resolvePath(ledger.destination, true),
     ledger.operation, ledgerPath, ledger
   ));
 });
@@ -952,6 +1480,34 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
 
   log('info', `[${jid}] Transfer started`, { operation, isResume, dest: destAbs });
 
+  // ── PRE-FLIGHT CHECKS ──────────────────────────────────────────
+  // 1. Recursive move: check if moving a folder into itself
+  // 2. Same-file: check if source and destination are identical
+
+  // Guard: Resume operations skip initial scan pre-flight as sources is null
+  const flightSources = sources || [];
+  for (const src of flightSources) {
+    const srcAbs  = await resolvePath(src, true);
+    const srcName = path.basename(srcAbs);
+    const dstItem = path.join(destAbs, srcName);
+
+    // Recursive Move Check: Are we moving a folder into its own sub-folder?
+    if (operation === 'move' && isSubpath(srcAbs, destAbs)) {
+      const errMsg = `Cannot move "${srcName}" into itself or its subdirectory.`;
+      log('error', `[${jid}] Recursive move detected`, { src: srcName, dest: destAbs });
+      updateJob(job, { status: 'error', error: errMsg, finishedAt: new Date().toISOString() });
+      return;
+    }
+
+    // Same-file Move Check: Are we moving a file to its own path?
+    if (operation === 'move' && srcAbs === dstItem) {
+      const errMsg = `Source and destination are identical for "${srcName}".`;
+      log('error', `[${jid}] Same-file move blocked`, { src: srcName });
+      updateJob(job, { status: 'error', error: errMsg, finishedAt: new Date().toISOString() });
+      return;
+    }
+  }
+
   // ── MOVE FAST PATH: try top-level rename on each source ─────────
   // If source and destination are on the same device, a single rename()
   // on the top-level item moves the entire tree in O(1) — no I/O at all.
@@ -960,15 +1516,15 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
     const needsCopy = [];
 
     for (const src of sources) {
-      const srcAbs  = resolvePath(src);
+      const srcAbs  = await resolvePath(src, true);
       const srcName = path.basename(srcAbs);
       const dstItem = path.join(destAbs, srcName);
 
-      try { await fs.promises.mkdir(destAbs, { recursive: true }); } catch {}
+      try { await fs.promises.mkdir(destAbs, { recursive: true }); } catch (e) { logDebug('mkdir failed during move', { path: destAbs, error: e.message }); }
 
       // Check if dest already exists and we have a top-level resolution
       let destExists = false;
-      try { await fs.promises.stat(dstItem); destExists = true; } catch {}
+      try { await fs.promises.stat(dstItem); destExists = true; } catch (e) { /* dest doesn't exist */ }
 
       if (destExists) {
         const res = conflictResolutions[toVirtual(dstItem)];
@@ -986,6 +1542,8 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
           } catch (e2) {
             if (e2.code === 'EXDEV') { needsCopy.push({ src, dst: newDst }); }
             else { needsCopy.push({ src, dst: newDst }); }
+          } finally {
+            releaseName(newDst);
           }
           continue;
         }
@@ -1056,9 +1614,18 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
     fileQueue = [];
     const scanStart = Date.now();
 
-    for (const src of sources) {
-      const srcAbs  = resolvePath(src);
-      const srcName = path.basename(srcAbs);
+    const scanSources = originalSources || [];
+    for (const src of scanSources) {
+      const srcAbs  = await resolvePath(src, true);
+      let   srcName = path.basename(srcAbs);
+      
+      // If copying to same parent, add unique suffix to avoid self-overwrite
+      if (operation === 'copy' && srcAbs === path.join(destAbs, srcName)) {
+        const free = await findFreeName(path.join(destAbs, srcName));
+        srcName = path.basename(free);
+        log('info', `[${jid}] Auto-renamed same-path copy`, { old: path.basename(srcAbs), new: srcName });
+      }
+
       let   stat;
       try { stat = await fs.promises.stat(srcAbs); }
       catch (e) {
@@ -1196,15 +1763,13 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
         }
 
         let effectiveDest = f.destPath;
-        try {
-          await fs.promises.stat(effectiveDest);
-          const resolution = conflictResolutions[toVirtual(effectiveDest)] || 'overwrite';
-          if (resolution === 'skip') {
-            ledgerSetState(ledger, f.destPath, 'done');
-            doneFiles++; doneBytes += f.size; scheduleProgress(fname); scheduleLedger(); continue;
-          }
-          if (resolution === 'keepboth') effectiveDest = await findFreeName(effectiveDest);
-        } catch {} // dest doesn't exist — proceed
+        let resolution = 'overwrite';
+        try { await fs.promises.stat(effectiveDest); resolution = conflictResolutions[toVirtual(effectiveDest)] || 'overwrite'; } catch (e) { /* dest doesn't exist */ }
+        if (resolution === 'skip') {
+          ledgerSetState(ledger, f.destPath, 'done');
+          doneFiles++; doneBytes += f.size; scheduleProgress(fname); scheduleLedger(); continue;
+        }
+        if (resolution === 'keepboth') effectiveDest = await findFreeName(effectiveDest);
 
         try {
           await fs.promises.rename(f.srcAbs, effectiveDest);
@@ -1223,7 +1788,8 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
           // Real error
           const errMsg = `Cannot move "${fname}": ${e.message} (${e.code})`;
           log('error', `[${jid}] Rename failed`, { file: fname, code: e.code });
-          job.log.push(errMsg);
+          addJobLog(job, errMsg);
+          job.errorCount = (job.errorCount || 0) + 1;
           ledgerSetState(ledger, f.destPath, 'error');
           notifyGotify(`Transfer error ✗`, `${errMsg}\nJob: ${jid}`, 9);
           updateJob(job, { status: 'error', error: errMsg, finishedAt: new Date().toISOString() });
@@ -1231,6 +1797,8 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
           if (progressTimer) clearTimeout(progressTimer);
           if (ledgerTimer)   clearTimeout(ledgerTimer);
           return;
+        } finally {
+          if (resolution === 'keepboth') releaseName(effectiveDest);
         }
       }
 
@@ -1245,7 +1813,7 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
     let   copyIdx   = 0; // shared atomic index (safe: JS single-threaded)
     let   fatalErr  = null;
 
-    async function copyWorker() {
+    const copyWorker = async () => {
       while (copyIdx < copySlice.length && !job.cancelRequested && !fatalErr) {
         const f     = copySlice[copyIdx++];
         const fname = path.basename(f.destPath);
@@ -1262,10 +1830,11 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
             startByte = ps.size;
             log('info', `[${jid}] Resuming partial`, { file: fname, from: startByte, total: f.size });
           }
-        } catch {}
+        } catch (e) { /* partial file doesn't exist */ }
 
         // Conflict resolution
         let effectiveDest = f.destPath;
+        let pNameReserved = false;
         if (startByte === 0) {
           try {
             await fs.promises.stat(effectiveDest);
@@ -1275,8 +1844,11 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
               ledgerSetState(ledger, f.destPath, 'done');
               doneFiles++; doneBytes += f.size; scheduleProgress(fname); scheduleLedger(); continue;
             }
-            if (resolution === 'keepboth') effectiveDest = await findFreeName(effectiveDest);
-          } catch {}
+            if (resolution === 'keepboth') {
+              effectiveDest = await findFreeName(effectiveDest);
+              pNameReserved = true;
+            }
+          } catch (e) { /* no conflict */ }
         }
 
         const copyStart = Date.now();
@@ -1286,7 +1858,7 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
           if (srcLst && srcLst.isSymbolicLink()) {
             const target = await fs.promises.readlink(f.srcAbs);
             await fs.promises.mkdir(path.dirname(effectiveDest), { recursive: true });
-            try { await fs.promises.unlink(effectiveDest); } catch {}
+            try { await fs.promises.unlink(effectiveDest); } catch (e) { /* ignore unlink error if not exists */ }
             await fs.promises.symlink(target, effectiveDest);
             log('debug', `[${jid}] Symlink recreated`, { link: effectiveDest, target });
           } else {
@@ -1301,12 +1873,14 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
         } catch (e) {
           const errMsg = `Failed to copy "${fname}": ${e.message}`;
           log('error', `[${jid}] Copy failed`, { file: fname, code: e.code, error: e.message, start_byte: startByte });
-          job.log.push(errMsg);
+          addJobLog(job, errMsg);
           job.errorCount = (job.errorCount || 0) + 1;
           ledgerSetState(ledger, f.destPath, 'error');
           notifyGotify(`Transfer error ✗`, `${errMsg}\nJob: ${jid}\nClick Resume to continue.`, 9);
           fatalErr = { errMsg, finishedAt: new Date().toISOString() };
           break;
+        } finally {
+          if (pNameReserved) releaseName(effectiveDest);
         }
 
         const copyMs = Date.now() - copyStart;
@@ -1320,7 +1894,7 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
 
         if (operation === 'move') {
           try { await fs.promises.unlink(f.srcAbs); }
-          catch (e) { if (e.code !== 'ENOENT') job.log.push(`Warning: could not delete source "${fname}": ${e.message}`); }
+          catch (e) { if (e.code !== 'ENOENT') addJobLog(job, `Warning: could not delete source "${fname}": ${e.message}`); }
         }
 
         if (effectiveDest !== f.destPath)
@@ -1368,14 +1942,31 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
   if (operation === 'move' && originalSources) {
     updateJob(job, { phase: 'cleaning' });
     for (const src of originalSources) {
-      const srcAbs = resolvePath(src);
+      const srcAbs = await resolvePath(src, true);
       try {
         const stat = await fs.promises.stat(srcAbs).catch(() => null);
         if (stat && stat.isDirectory()) {
-          await fs.promises.rm(srcAbs, { recursive: true, force: true });
-          log('debug', `[${jid}] Removed source dir`, { dir: srcAbs });
+          // SURGICAL CLEANUP: Use a surgical approach to avoid deleting skipped or extraneous files.
+          // We walk the source again and only delete files if we're sure they were part of this move
+          // and marked as 'done' (successfully moved/overwritten).
+          for await (const entry of walkDir(srcAbs, '')) {
+            const destPath = path.join(destAbs, entry.relPath);
+            if (ledger.files[destPath] === 'done') {
+              try { await fs.promises.unlink(entry.srcAbs); } catch (e) { /* ignore unlink error */ }
+            }
+          }
+          // After unlinking moved files, attempt to prune now-empty directories.
+          await pruneEmpty(srcAbs);
+          log('debug', `[${jid}] Surgical cleanup complete`, { dir: srcAbs });
+        } else if (stat && stat.isFile()) {
+          // If it was a single file move, and it's marked done, delete it.
+          const srcName = path.basename(srcAbs);
+          const destPath = path.join(destAbs, srcName);
+          if (ledger.files[destPath] === 'done') {
+            try { await fs.promises.unlink(srcAbs); } catch (e) { /* ignore */ }
+          }
         }
-      } catch {}
+      } catch (e) { logDebug('Cleanup: stat failed', { dir: srcAbs, error: e.message }); }
     }
   }
 
@@ -1386,198 +1977,225 @@ async function runTransfer(job, sources, destAbs, operation, existingLedgerPath,
     avg_mbps: doneBytes > 0 ? Math.round((doneBytes / 1024 / 1024) / Math.max(totalMs / 1000, 0.001)) : 0
   });
 
-  try { await fs.promises.unlink(ledgerPath); } catch {}
+  try { await fs.promises.unlink(ledgerPath); } catch (e) { logDebug('Ledger unlink failed (final cleanup)', { path: ledgerPath, error: e.message }); }
 
   updateJob(job, { status: 'done', percent: 100, filePercent: 100, phase: 'done', finishedAt: new Date().toISOString() });
 }
 
-// DELETE (to trash) ──────────────────────────────────────────────
-app.post('/api/delete', (req, res) => {
-  const { paths, clientId } = req.body;
-  if (!paths?.length) return res.status(400).json({ error: 'No paths' });
-
-  // Guard: never allow deleting the virtual root '/' or ROOT itself
-  const safeToDelete = paths.filter(p => p && p !== '/' && resolvePath(p) !== ROOT);
-  if (safeToDelete.length === 0) return res.status(400).json({ error: 'Cannot delete root' });
-  const filteredPaths = safeToDelete;
-
-  const metaFile = path.join(TRASH_DIR, '.meta.json');
-
-  // For tiny deletes (≤5 items) do it synchronously so UI feels instant
-  if (filteredPaths.length <= 5) {
-    let meta = fs.existsSync(metaFile) ? JSON.parse(fs.readFileSync(metaFile)) : [];
-    const errors = [];
-    for (const p of filteredPaths) {
-      const abs      = resolvePath(p);
-      const id       = uuidv4();
-      const trashPath = path.join(TRASH_DIR, id);
-      try {
-        fs.renameSync(abs, trashPath);
-        meta.push({ id, originalPath: p, name: path.basename(abs), deletedAt: new Date().toISOString(), trashPath });
-      } catch (err) { errors.push({ path: p, error: err.message }); }
-    }
-    fs.writeFileSync(metaFile, JSON.stringify(meta));
-    return errors.length ? res.status(207).json({ errors }) : res.json({ success: true });
+// Depth-first prune of empty directories after a move operation.
+async function pruneEmpty(dir) {
+  let entries;
+  try { entries = await fs.promises.readdir(dir); } catch (e) { return; }
+  for (const e of entries) {
+    const full = path.join(dir, e);
+    try {
+      if ((await fs.promises.stat(full)).isDirectory()) await pruneEmpty(full);
+    } catch (e2) { /* ignore */ }
   }
+  try {
+    if ((await fs.promises.readdir(dir)).length === 0) await fs.promises.rmdir(dir);
+  } catch (e) { /* ignore rmdir error */ }
+}
 
-  // Large batch delete — run as background job
-  const job = createJob('delete', clientId, { sources: filteredPaths, phase: 'deleting' });
-  res.json({ jobId: job.jobId, started: true });
-  setImmediate(() => runDelete(job, filteredPaths, metaFile));
+app.post('/api/delete', async (req, res) => {
+  try {
+    const { paths, clientId } = req.body;
+    if (!paths?.length) return res.status(400).json({ error: 'No paths' });
+
+    log('info', 'Trash requested', { paths: paths.length, clientId: (clientId || '').slice(0, 12) });
+
+    const safeToDelete = [];
+    for (const p of paths) {
+      if (!p || p === '/') continue;
+      try {
+        if (await resolvePath(p, true) !== ROOT) safeToDelete.push(p);
+      } catch (e) { /* ignore error in filter */ }
+    }
+    if (safeToDelete.length === 0) return res.status(400).json({ error: 'Cannot delete root or escaped paths' });
+    const filteredPaths = safeToDelete;
+
+    const job = createJob('delete', clientId, { sources: filteredPaths, phase: 'deleting' });
+    log('info', 'Trash job started', { jobId: job.jobId.slice(0, 8), count: filteredPaths.length });
+    res.json({ jobId: job.jobId, started: true });
+    setImmediate(() => runDelete(job, filteredPaths));
+  } catch (err) { res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message }); }
 });
 
-async function runDelete(job, paths, metaFile) {
-  let meta = [];
-  try { meta = fs.existsSync(metaFile) ? JSON.parse(fs.readFileSync(metaFile)) : []; } catch {}
+async function runDelete(job, paths) {
   const total = paths.length;
   let done = 0;
-
   for (const p of paths) {
-    const abs       = resolvePath(p);
-    const id        = uuidv4();
-    const trashPath = path.join(TRASH_DIR, id);
     try {
-      fs.renameSync(abs, trashPath);
-      meta.push({ id, originalPath: p, name: path.basename(abs), deletedAt: new Date().toISOString(), trashPath });
+      const abs       = await resolvePath(p, true);
+      const name      = path.basename(abs);
+      const id        = uuidv4();
+      const trashPath = path.join(TRASH_DIR, id);
+      try {
+        await fs.promises.rename(abs, trashPath);
+      } catch (e) {
+        if (e.code === 'EXDEV') {
+          // Cross-device trash: fallback to recursive copy + delete for directories and files
+          await fs.promises.cp(abs, trashPath, { recursive: true });
+          await fs.promises.rm(abs, { recursive: true, force: true });
+        } else throw e;
+      }
+      await run(`INSERT INTO trash (id, name, originalPath, trashPath, deletedAt) VALUES (?, ?, ?, ?, ?)`, 
+                [id, name, p, trashPath, new Date().toISOString()]);
     } catch (e) {
-      job.log.push(`Failed to trash ${p}: ${e.message}`);
+      logDebug('Delete task failed for item', { path: p, error: e.message });
+      addJobLog(job, `Failed to trash ${p}: ${e.message}`);
+      job.errorCount = (job.errorCount || 0) + 1;
     }
     done++;
     if (done % 10 === 0 || done === total) {
-      // Write meta incrementally so we don't lose track if process dies
-      try { fs.writeFileSync(metaFile, JSON.stringify(meta)); } catch {}
       updateJob(job, { percent: Math.round((done / total) * 100), currentFile: path.basename(p) });
-      // Yield to event loop every batch so health checks and HTTP stay responsive
       await new Promise(r => setImmediate(r));
     }
   }
-  try { fs.writeFileSync(metaFile, JSON.stringify(meta)); } catch {}
   updateJob(job, { status: 'done', percent: 100, phase: 'done', finishedAt: new Date().toISOString(), sources: paths });
 }
 
 // PERMANENT DELETE ───────────────────────────────────────────────
-app.post('/api/delete-permanent', (req, res) => {
-  const { paths, clientId } = req.body;
-  if (!paths?.length) return res.status(400).json({ error: 'No paths' });
+app.post('/api/delete-permanent', async (req, res) => {
+  try {
+    const { paths, clientId } = req.body;
+    if (!paths?.length) return res.status(400).json({ error: 'No paths' });
 
-  // Guard: never allow deleting the virtual root '/' or ROOT itself
-  const safePaths = paths.filter(p => p && p !== '/' && resolvePath(p) !== ROOT);
-  if (safePaths.length === 0) return res.status(400).json({ error: 'Cannot delete root' });
-
-  if (safePaths.length <= 5) {
-    const errors = [];
-    for (const p of safePaths) {
-      try { fs.rmSync(resolvePath(p), { recursive: true, force: true }); }
-      catch (err) { errors.push({ path: p, error: err.message }); }
+    // Guard: never allow deleting the virtual root '/' or ROOT itself
+    const safePaths = [];
+    for (const p of paths) {
+      if (!p || p === '/') continue;
+      try {
+        if (await resolvePath(p, true) !== ROOT) safePaths.push(p);
+      } catch (e) { /* ignore */ }
     }
-    return errors.length ? res.status(207).json({ errors }) : res.json({ success: true });
-  }
+    if (safePaths.length === 0) return res.status(400).json({ error: 'Cannot delete root' });
 
-  const job = createJob('delete-permanent', clientId, { sources: safePaths, phase: 'deleting' });
-  res.json({ jobId: job.jobId, started: true });
-  setImmediate(() => {
-    const total = safePaths.length;
-    let done = 0;
-    for (const p of safePaths) {
-      try { fs.rmSync(resolvePath(p), { recursive: true, force: true }); }
-      catch (e) { job.log.push(`Failed: ${p}: ${e.message}`); }
-      done++;
-      if (done % 10 === 0 || done === total)
-        updateJob(job, { percent: Math.round((done / total) * 100), currentFile: path.basename(p) });
-    }
-    updateJob(job, { status: 'done', percent: 100, phase: 'done', finishedAt: new Date().toISOString(), sources: safePaths });
-  });
+    const job = createJob('delete-permanent', clientId, { sources: safePaths, phase: 'deleting' });
+    log('info', 'Permanent delete requested', { jobId: job.jobId.slice(0, 8), paths: safePaths.length, clientId: (clientId || '').slice(0, 12) });
+    res.json({ jobId: job.jobId, started: true });
+
+    setImmediate(async () => {
+      try {
+        const total = safePaths.length;
+        let done = 0;
+        for (const p of safePaths) {
+          try { await fs.promises.rm(await resolvePath(p, true), { recursive: true, force: true }); }
+          catch (e) { 
+            log('error', `Permanent delete failed: ${p}`, { error: e.message }); 
+            addJobLog(job, `Failed: ${p}: ${e.message}`); 
+            job.errorCount = (job.errorCount || 0) + 1;
+          }
+          done++;
+          if (done % 5 === 0 || done === total)
+            updateJob(job, { percent: Math.round((done / total) * 100), currentFile: path.basename(p) });
+        }
+        updateJob(job, { status: 'done', percent: 100, phase: 'done', finishedAt: new Date().toISOString() });
+      } catch (err) {
+        log('error', `Permanent delete routine crashed`, { error: err.message });
+        updateJob(job, { status: 'error', error: err.message, finishedAt: new Date().toISOString() });
+      }
+    });
+  } catch (err) { res.status(err.message.includes('Symlink escape') || err.message.includes('traversal') ? 403 : 500).json({ error: err.message }); }
 });
 
 // SYMLINK — recreate a broken symlink with a new target
-app.post('/api/symlink/recreate', (req, res) => {
-  const { path: p, target } = req.body;
-  if (!p || !target) return res.status(400).json({ error: 'Missing path or target' });
-  const abs = resolvePath(p);
+app.post('/api/symlink/recreate', async (req, res) => {
   try {
+    const { path: p, target } = req.body;
+    if (!p || !target) return res.status(400).json({ error: 'Missing path or target' });
+    const abs = await resolvePath(p, true);
+    // Security check: target must be inside ROOT (virtual or absolute)
+    try { await resolvePath(target, false); }
+    catch (e) { return res.status(403).json({ error: 'Symlink target must be inside ROOT: ' + target }); }
+
     // Remove the broken link first
-    fs.unlinkSync(abs);
+    await fs.promises.unlink(abs);
     // Re-create with new target
-    fs.symlinkSync(target, abs);
-    log('info', 'Symlink recreated', { link: toVirtual(abs), target });
+    await fs.promises.symlink(target, abs);
+    log('info', 'Symlink recreated', { link: toVirtual(abs), target, clientId: (req.body.clientId || '').slice(0, 12) });
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) { res.status(err.message.includes('Symlink escape') || err.message.includes('traversal') ? 403 : 500).json({ error: err.message }); }
 });
 
 // EMPTY TRASH ────────────────────────────────────────────────────
-app.post('/api/trash/empty', (req, res) => {
+app.post('/api/trash/empty', async (req, res) => {
   const { clientId } = req.body;
-  const metaFile = path.join(TRASH_DIR, '.meta.json');
-  let meta = [];
-  try { meta = fs.existsSync(metaFile) ? JSON.parse(fs.readFileSync(metaFile)) : []; } catch {}
+  try {
+    const meta = await query(`SELECT * FROM trash`);
+    if (meta.length === 0) return res.json({ success: true });
 
-  if (meta.length === 0) { fs.writeFileSync(metaFile, '[]'); return res.json({ success: true }); }
-
-  if (meta.length <= 10) {
-    for (const item of meta) { try { fs.rmSync(item.trashPath, { recursive: true, force: true }); } catch {} }
-    fs.writeFileSync(metaFile, '[]');
-    return res.json({ success: true });
-  }
-
-  const job = createJob('trash-empty', clientId, { sources: meta.map(i => i.trashPath), phase: 'deleting' });
-  res.json({ jobId: job.jobId, started: true });
-  setImmediate(() => {
-    const total = meta.length;
-    let done = 0;
-    for (const item of meta) {
-      try { fs.rmSync(item.trashPath, { recursive: true, force: true }); }
-      catch (e) { job.log.push(`Failed: ${item.name}: ${e.message}`); }
-      done++;
-      if (done % 5 === 0 || done === total) {
-        // Shrink meta file as we go — so a crash doesn't leave orphans
-        const remaining = meta.slice(done);
-        try { fs.writeFileSync(metaFile, JSON.stringify(remaining)); } catch {}
-        updateJob(job, { percent: Math.round((done / total) * 100), currentFile: item.name });
+    const job = createJob('trash-empty', clientId, { sources: meta.map(i => i.trashPath), phase: 'deleting' });
+    log('info', 'Trash empty requested', { jobId: job.jobId.slice(0, 8), items: meta.length, clientId: (clientId || '').slice(0, 12) });
+    res.json({ jobId: job.jobId, started: true });
+    setImmediate(async () => {
+      const total = meta.length;
+      let done = 0;
+      for (const item of meta) {
+        try { await fs.promises.rm(item.trashPath, { recursive: true, force: true }); }
+        catch (e) { 
+          addJobLog(job, `Failed: ${item.name}: ${e.message}`);
+          job.errorCount = (job.errorCount || 0) + 1;
+        }
+        done++;
+        if (done % 10 === 0 || done === total) {
+          updateJob(job, { percent: Math.round((done / total) * 100), currentFile: item.name });
+        }
       }
-    }
-    try { fs.writeFileSync(metaFile, '[]'); } catch {}
-    updateJob(job, { status: 'done', percent: 100, phase: 'done', finishedAt: new Date().toISOString() });
-  });
+      await run(`DELETE FROM trash`);
+      updateJob(job, { status: 'done', percent: 100, phase: 'done', finishedAt: new Date().toISOString() });
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 // UPLOAD ─────────────────────────────────────────────────────────
 // Files land in /tmp first (express-fileupload useTempFiles:true)
 // We then move them in a background job — so closing the browser
 // after the upload HTTP request completes doesn't lose the file.
-app.post('/api/upload', (req, res) => {
-  if (!req.files || !Object.keys(req.files).length) return res.status(400).json({ error: 'No files' });
-  const destDir  = resolvePath(req.body.path || '/');
-  const clientId = req.body.clientId || 'unknown';
-  const fileList = Array.isArray(req.files.files) ? req.files.files : [req.files.files];
-  const names    = fileList.map(f => f.name);
+app.post('/api/upload', async (req, res) => {
+  try {
+    if (!req.files || !Object.keys(req.files).length) return res.status(400).json({ error: 'No files' });
+    const destDir  = await resolvePath(req.body.path || '/', true);
+    const clientId = req.body.clientId || 'unknown';
+    const fileList = Array.isArray(req.files.files) ? req.files.files : [req.files.files];
+    // Sanitize filenames: remove directory separators and other risky characters
+    const sanitize = (n) => n.replace(/[/\\]/g, '_').replace(/^\.+/, '_').trim() || 'unnamed';
+    const names    = fileList.map(f => sanitize(f.name));
 
-  const job = createJob('upload', clientId, {
-    sources:     names,
-    destination: req.body.path || '/',
-    phase:       'saving',
-    operation:   'upload'
-  });
-  // Respond immediately — browser can close after this
-  res.json({ jobId: job.jobId, started: true, files: names });
+    const job = createJob('upload', clientId, {
+      sources:     names,
+      destination: req.body.path || '/',
+      phase:       'saving',
+      operation:   'upload'
+    });
+    // Respond immediately — browser can close after this
+    res.json({ jobId: job.jobId, started: true, files: names });
 
-  setImmediate(async () => {
-    const total = fileList.length;
-    let done    = 0;
-    for (const file of fileList) {
-      const dest = path.join(destDir, file.name);
-      updateJob(job, { currentFile: file.name, filePercent: 0, percent: Math.round((done / total) * 100) });
-      try {
-        await file.mv(dest);
-        done++;
-        updateJob(job, { percent: Math.round((done / total) * 100), filePercent: 100 });
-      } catch (e) {
-        job.log.push(`Failed to save ${file.name}: ${e.message}`);
-        done++;
-        updateJob(job, { percent: Math.round((done / total) * 100) });
+    setImmediate(async () => {
+      const total = fileList.length;
+      let done    = 0;
+      for (let i = 0; i < fileList.length; i++) {
+        const file = fileList[i];
+        const sName = names[i];
+        let dest = path.join(destDir, sName);
+        dest = await findFreeName(dest);
+        updateJob(job, { currentFile: sName, filePercent: 0, percent: Math.round((done / total) * 100) });
+        try {
+          await file.mv(dest);
+          done++;
+          updateJob(job, { percent: Math.round((done / total) * 100), filePercent: 100 });
+        } catch (e) {
+          addJobLog(job, `Failed to save ${file.name}: ${e.message}`);
+          job.errorCount = (job.errorCount || 0) + 1;
+          done++;
+          updateJob(job, { percent: Math.round((done / total) * 100) });
+        } finally {
+          releaseName(dest);
+        }
       }
-    }
-    updateJob(job, { status: 'done', percent: 100, phase: 'done', finishedAt: new Date().toISOString() });
-  });
+      updateJob(job, { status: 'done', percent: 100, phase: 'done', finishedAt: new Date().toISOString() });
+    });
+  } catch (err) { res.status(err.message.includes('Symlink escape') || err.message.includes('traversal') ? 403 : 500).json({ error: err.message }); }
 });
 
 
@@ -1592,70 +2210,90 @@ const EDITABLE_EXTS = new Set([
   'cpp','h','hpp','cs','swift','kt','r','lua','pl','fish','bat','ps1'
 ]);
 
-app.get('/api/file/read', (req, res) => {
-  const p   = resolvePath(req.query.path);
-  const ext = path.extname(p).toLowerCase().replace('.', '');
-  if (!EDITABLE_EXTS.has(ext)) return res.status(400).json({ error: 'File type not editable' });
+app.get('/api/file/read', async (req, res) => {
   try {
-    const content = fs.readFileSync(p, 'utf8');
-    const stat    = fs.statSync(p);
+    const p   = await resolvePath(req.query.path, true);
+    const ext = path.extname(p).toLowerCase().replace('.', '');
+    if (!EDITABLE_EXTS.has(ext)) return res.status(400).json({ error: 'File type not editable' });
+    const content = await fs.promises.readFile(p, 'utf8');
+    const stat    = await fs.promises.stat(p);
     res.json({ content, size: stat.size, modified: stat.mtime });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    const status = e.message.includes('Symlink escape') ? 403 : 500;
+    res.status(status).json({ error: e.message });
+  }
 });
 
-app.post('/api/file/write', (req, res) => {
-  const { path: p, content } = req.body;
-  if (content === undefined) return res.status(400).json({ error: 'No content' });
-  const abs = resolvePath(p);
-  const ext = path.extname(abs).toLowerCase().replace('.', '');
-  if (!EDITABLE_EXTS.has(ext)) return res.status(400).json({ error: 'File type not editable' });
+app.post('/api/file/write', async (req, res) => {
+  let tmp = null;
   try {
-    // Atomic write: write to .tmp then rename
-    const tmp = abs + '.nova_edit_tmp';
-    fs.writeFileSync(tmp, content, 'utf8');
-    fs.renameSync(tmp, abs);
-    const stat = fs.statSync(abs);
-    log('info', 'File saved', { path: toVirtual(abs), size: stat.size });
+    const { path: p, content } = req.body;
+    if (content === undefined) return res.status(400).json({ error: 'No content' });
+    const abs = await resolvePath(p, true);
+    const ext = path.extname(abs).toLowerCase().replace('.', '');
+    if (!EDITABLE_EXTS.has(ext)) return res.status(400).json({ error: 'File type not editable' });
+
+    // Atomic write: write to unique .tmp then rename
+    tmp = abs + '.nova_edit_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+    await fs.promises.writeFile(tmp, content, 'utf8');
+    await fs.promises.rename(tmp, abs);
+    tmp = null; // Marked as successfully moved
+    
+    const stat = await fs.promises.stat(abs);
+    log('info', 'File saved', { path: toVirtual(abs), size: stat.size, clientId: (req.body.clientId || '').slice(0, 12) });
     res.json({ success: true, size: stat.size, modified: stat.mtime });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { 
+    res.status(e.message.includes('Symlink escape') ? 403 : 500).json({ error: e.message }); 
+  } finally {
+    if (tmp) { try { await fs.promises.unlink(tmp); } catch(e) {} }
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────
 // ZIP / UNZIP — background jobs, survive browser close, resumable
 // ─────────────────────────────────────────────────────────────────
-app.post('/api/zip', (req, res) => {
-  const { sources, destination, clientId } = req.body;
-  if (!sources?.length || !destination) return res.status(400).json({ error: 'Missing sources or destination' });
-  const destAbs = resolvePath(destination);
-  const job     = createJob('zip', clientId, { sources, destination, phase: 'zipping' });
-  res.json({ jobId: job.jobId, started: true });
-  setImmediate(() => runZip(job, sources, destAbs));
+app.post('/api/zip', async (req, res) => {
+  try {
+    const { sources, destination, clientId } = req.body;
+    if (!sources?.length || !destination) return res.status(400).json({ error: 'Missing sources or destination' });
+    const destAbs = await resolvePath(destination, true);
+    const job     = createJob('zip', clientId, { sources, destination, phase: 'zipping' });
+    res.json({ jobId: job.jobId, started: true });
+    setImmediate(() => runZip(job, sources, destAbs));
+  } catch (err) { res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message }); }
 });
+
+async function sumDirSizeRecursive(abs, depth = 0) {
+  if (depth > 100) return { size: 0, files: 0 }; // Protection against infinite recursion
+  let size = 0, files = 0;
+  const entries = await fs.promises.readdir(abs, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = path.join(abs, entry.name);
+    if (entry.isDirectory()) {
+      const sub = await sumDirSizeRecursive(full, depth + 1);
+      size += sub.size; files += sub.files;
+    } else if (entry.isFile()) {
+      try { const s = await fs.promises.stat(full); size += s.size; files++; } catch (e) { /* skip unreadable files */ }
+    }
+  }
+  return { size, files };
+}
 
 async function runZip(job, sources, destAbs) {
   const jid = job.jobId.slice(0, 8);
   log('info', `[${jid}] Zip started`, { sources: sources.length, dest: destAbs });
 
-  // Count total size recursively for accurate progress bars
-  async function sumDirSizeRecursive(dir) {
-    let tot = 0;
-    let ents;
-    try { ents = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return 0; }
-    for (const e of ents) {
-      const full = path.join(dir, e.name);
-      if (e.isDirectory()) { tot += await sumDirSizeRecursive(full); }
-      else if (e.isFile()) { try { const s = await fs.promises.stat(full); tot += s.size; } catch {} }
-    }
-    return tot;
-  }
-
   let totalBytes = 0;
-  for (const src of sources) {
+    for (const src of sources) {
     try {
-      const s = fs.statSync(resolvePath(src));
-      if (s.isDirectory()) { totalBytes += await sumDirSizeRecursive(resolvePath(src)); }
+      const srcAbs = await resolvePath(src, true);
+      const s = await fs.promises.stat(srcAbs);
+      if (s.isDirectory()) { 
+        const res = await sumDirSizeRecursive(srcAbs); 
+        totalBytes += res.size; 
+      }
       else { totalBytes += s.size; }
-    } catch {}
+    } catch (e) { /* ignore stat error */ }
   }
   totalBytes = Math.max(totalBytes, 1);
 
@@ -1678,15 +2316,20 @@ async function runZip(job, sources, destAbs) {
         if (job.cancelRequested && !aborted) {
           aborted = true;
           clearInterval(cancelPoll);
+          
           archive.abort();
-          output.destroy();
-          try { fs.unlinkSync(partPath); } catch {}
-          updateJob(job, {
-            status: 'cancelled', percent: job.percent || 0,
-            finishedAt: new Date().toISOString(),
-            _zipSources: sources, _zipDest: toVirtual(destAbs)
+          
+          // Wait for stream to close before unlinking to prevent file locks/leaks
+          output.on('close', async () => {
+            try { await fs.promises.unlink(partPath); } catch (e) { /* ignore unlink error */ }
+            updateJob(job, {
+              status: 'cancelled', percent: job.percent || 0,
+              finishedAt: new Date().toISOString(),
+              _zipSources: sources, _zipDest: toVirtual(destAbs)
+            });
+            resolve();
           });
-          resolve(); // resolve so we don't double-error
+          output.destroy();
         }
       }, 200);
 
@@ -1710,16 +2353,21 @@ async function runZip(job, sources, destAbs) {
       });
 
       archive.pipe(output);
-      for (const src of sources) {
-        const abs  = resolvePath(src);
-        const name = path.basename(abs);
-        try {
-          const s = fs.statSync(abs); // follows symlinks — zip the target content
-          if (s.isDirectory()) archive.directory(abs, name);
-          else                  archive.file(abs, { name });
-        } catch (e) { job.log.push(`Skipped ${name}: ${e.message}`); }
-      }
-      archive.finalize();
+      (async () => {
+        for (const src of sources) {
+          const abs  = await resolvePath(src, true);
+          const name = path.basename(abs);
+          try {
+            const s = await fs.promises.stat(abs); // follows symlinks — zip the target content
+            if (s.isDirectory()) { archive.directory(abs, name); }
+            else { archive.file(abs, { name }); }
+          } catch (e) { 
+            addJobLog(job, `Skipped ${name}: ${e.message}`); 
+            job.errorCount = (job.errorCount || 0) + 1;
+          }
+        }
+        archive.finalize();
+      })();
     });
 
     // Cancelled case handled inside promise
@@ -1736,40 +2384,46 @@ async function runZip(job, sources, destAbs) {
     updateJob(job, { status: 'done', percent: 100, phase: 'done', finishedAt: new Date().toISOString() });
   } catch (e) {
     log('error', `[${jid}] Zip failed`, { error: e.message });
-    try { fs.unlinkSync(partPath); } catch {}
-    try { fs.unlinkSync(destAbs); } catch {}
+    (async () => {
+      try { await fs.promises.unlink(partPath); } catch (e2) { /* ignore unlink error */ }
+      try { await fs.promises.unlink(destAbs); } catch (e3) { /* ignore unlink error */ }
+    })();
     notifyGotify('Zip failed ✗', `${path.basename(destAbs)}\n${e.message}`, 9);
     updateJob(job, { status: 'error', error: e.message, finishedAt: new Date().toISOString() });
   }
 }
 
 // Resume a cancelled zip — restart from scratch (can't partially continue a zip archive)
-app.post('/api/zip/resume', (req, res) => {
-  const { jobId, clientId } = req.body;
-  if (!jobId) return res.status(400).json({ error: 'Missing jobId' });
-  const oldJob = jobs.get(jobId);
-  if (!oldJob) return res.status(404).json({ error: 'Job not found' });
-  const sources = oldJob._zipSources || oldJob.sources;
-  const dest    = oldJob._zipDest    || oldJob.destination;
-  if (!sources?.length || !dest) return res.status(400).json({ error: 'Cannot resume: missing sources/destination' });
-  const destAbs = resolvePath(dest);
-  const newJob  = createJob('zip', clientId || oldJob.clientId, {
-    sources, destination: dest, phase: 'zipping', resumedFrom: jobId
-  });
-  res.json({ jobId: newJob.jobId, started: true });
-  setImmediate(() => runZip(newJob, sources, destAbs));
+app.post('/api/zip/resume', async (req, res) => {
+  try {
+    const { jobId, clientId } = req.body;
+    if (!jobId) return res.status(400).json({ error: 'Missing jobId' });
+    const oldJob = jobs.get(jobId);
+    if (!oldJob) return res.status(404).json({ error: 'Job not found' });
+    const sources = oldJob._zipSources || oldJob.sources;
+    const dest    = oldJob._zipDest    || oldJob.destination;
+    if (!sources?.length || !dest) return res.status(400).json({ error: 'Cannot resume: missing sources/destination' });
+    const destAbs = await resolvePath(dest, true);
+    const newJob  = createJob('zip', clientId || oldJob.clientId, {
+      sources, destination: dest, phase: 'zipping', resumedFrom: jobId
+    });
+    res.json({ jobId: newJob.jobId, started: true });
+    setImmediate(() => runZip(newJob, sources, destAbs));
+  } catch (err) { res.status(err.message.includes('Symlink escape') || err.message.includes('traversal') ? 403 : 500).json({ error: err.message }); }
 });
 
-app.post('/api/unzip', (req, res) => {
-  const { path: p, destination, clientId } = req.body;
-  if (!p) return res.status(400).json({ error: 'Missing path' });
-  const abs     = resolvePath(p);
-  const destDir = destination ? resolvePath(destination) : path.dirname(abs);
-  const job     = createJob('unzip', clientId, {
-    sources: [p], destination: toVirtual(destDir), phase: 'extracting'
-  });
-  res.json({ jobId: job.jobId, started: true });
-  setImmediate(() => runUnzip(job, abs, destDir));
+app.post('/api/unzip', async (req, res) => {
+  try {
+    const { path: p, destination, clientId } = req.body;
+    if (!p) return res.status(400).json({ error: 'Missing path' });
+    const abs     = await resolvePath(p, true);
+    const destDir = destination ? await resolvePath(destination, true) : path.dirname(abs);
+    const job     = createJob('unzip', clientId, {
+      sources: [p], destination: toVirtual(destDir), phase: 'extracting'
+    });
+    res.json({ jobId: job.jobId, started: true });
+    setImmediate(() => runUnzip(job, abs, destDir));
+  } catch (err) { res.status(err.message.includes('Symlink escape') || err.message.includes('traversal') ? 403 : 500).json({ error: err.message }); }
 });
 
 async function runUnzip(job, zipPath, destDir) {
@@ -1777,9 +2431,30 @@ async function runUnzip(job, zipPath, destDir) {
   const name = path.basename(zipPath);
   log('info', `[${jid}] Unzip started`, { file: name, dest: destDir });
 
-  try { await fs.promises.mkdir(destDir, { recursive: true }); } catch {}
+  try { await fs.promises.mkdir(destDir, { recursive: true }); } catch (e) { /* ignore mkdir error */ }
 
   try {
+    // SECURITY: Zip Slip Prevention. Scan archive contents before extraction.
+    const listResult = await new Promise((res) => {
+      // -Z1 = Zip info mode, filenames only. Much safer to parse.
+      execFile('unzip', ['-Z1', zipPath], { timeout: 30000 }, (err, stdout) => {
+        if (err) res({ err });
+        else res({ items: stdout.trim().split('\n') });
+      });
+    });
+
+    if (listResult.err) throw new Error('Could not read zip archive header');
+    const totalZipItems = listResult.items.filter(f => f.trim().length > 0).length;
+    const isZipSlip = listResult.items.some(fpath => {
+      const f = fpath.trim();
+      return f.includes('..') || f.startsWith('/');
+    });
+
+    if (isZipSlip) {
+      log('warn', 'Zip Slip attempt blocked', { file: name, zip: zipPath });
+      throw new Error('Security: Zip archive contains invalid paths (Zip Slip detected)');
+    }
+
     await new Promise((resolve, reject) => {
       const child = execFile('unzip', ['-o', zipPath, '-d', destDir], { timeout: 300_000 }, (err) => {
         if (job.cancelRequested) return;
@@ -1806,8 +2481,10 @@ async function runUnzip(job, zipPath, destDir) {
             const m = line.match(/inflating:\s+(.+)/);
             if (m) {
               fileCount++;
-              // fileCount is NOT a percentage — cap at 95 so 100% only shows on true done
-              const pct = Math.min(95, fileCount);
+              // Use real percentage based on total item count from -Z1 scan
+              const pct = totalZipItems > 0
+                ? Math.min(95, Math.round((fileCount / totalZipItems) * 100))
+                : Math.min(95, fileCount);
               updateJob(job, { currentFile: path.basename(m[1].trim()), phase: 'extracting',
                                percent: pct });
             }
@@ -1819,7 +2496,13 @@ async function runUnzip(job, zipPath, destDir) {
       const cancelPoll = setInterval(() => {
         if (job.cancelRequested) {
           clearInterval(cancelPoll);
-          try { child.kill('SIGTERM'); } catch {}
+          try { 
+            child.kill('SIGTERM'); 
+            // Failsafe: if still alive after 2s, send SIGKILL
+            setTimeout(() => {
+              try { if (child.exitCode === null) child.kill('SIGKILL'); } catch(e) {}
+            }, 2000);
+          } catch (e) { /* ignore kill error */ }
           updateJob(job, {
             status: 'cancelled', finishedAt: new Date().toISOString(),
             _unzipPath: toVirtual(zipPath), _unzipDest: toVirtual(destDir)
@@ -1848,47 +2531,42 @@ async function runUnzip(job, zipPath, destDir) {
 }
 
 // Cancel zip/unzip job
-app.post('/api/zip/cancel', (req, res) => {
+app.post('/api/zip/cancel', async (req, res) => {
   const { jobId } = req.body;
   const job = jobs.get(jobId);
   if (!job || job.status !== 'running') return res.status(404).json({ error: 'No running job' });
   job.cancelRequested = true;
-  if (job._unzipProc) { try { job._unzipProc.kill('SIGTERM'); } catch {} }
+  if (job._unzipProc) { try { job._unzipProc.kill('SIGTERM'); } catch (e) { /* ignore kill error */ } }
   log('info', `[${jobId.slice(0,8)}] Zip/unzip cancel requested`);
   res.json({ ok: true });
 });
 
 // Resume a cancelled unzip — re-extract (unzip -o overwrites safely)
-app.post('/api/unzip/resume', (req, res) => {
-  const { jobId, clientId } = req.body;
-  if (!jobId) return res.status(400).json({ error: 'Missing jobId' });
-  const oldJob = jobs.get(jobId);
-  if (!oldJob) return res.status(404).json({ error: 'Job not found' });
-  const zipPath = oldJob._unzipPath || (oldJob.sources && oldJob.sources[0]);
-  const dest    = oldJob._unzipDest || oldJob.destination;
-  if (!zipPath) return res.status(400).json({ error: 'Cannot resume: missing zip path' });
-  const absZip  = resolvePath(zipPath);
-  const absDest = dest ? resolvePath(dest) : path.dirname(absZip);
-  const newJob  = createJob('unzip', clientId || oldJob.clientId, {
-    sources: [zipPath], destination: toVirtual(absDest), phase: 'extracting', resumedFrom: jobId
-  });
-  res.json({ jobId: newJob.jobId, started: true });
-  setImmediate(() => runUnzip(newJob, absZip, absDest));
+app.post('/api/unzip/resume', async (req, res) => {
+  try {
+    const { jobId, clientId } = req.body;
+    if (!jobId) return res.status(400).json({ error: 'Missing jobId' });
+    const oldJob = jobs.get(jobId);
+    if (!oldJob) return res.status(404).json({ error: 'Job not found' });
+    const zipPath = oldJob._unzipPath || (oldJob.sources && oldJob.sources[0]);
+    const dest    = oldJob._unzipDest || oldJob.destination;
+    if (!zipPath) return res.status(400).json({ error: 'Cannot resume: missing zip path' });
+    const absZip  = await resolvePath(zipPath, true);
+    const absDest = dest ? await resolvePath(dest, true) : path.dirname(absZip);
+    const newJob  = createJob('unzip', clientId || oldJob.clientId, {
+      sources: [zipPath], destination: toVirtual(absDest), phase: 'extracting', resumedFrom: jobId
+    });
+    res.json({ jobId: newJob.jobId, started: true });
+    setImmediate(() => runUnzip(newJob, absZip, absDest));
+  } catch (err) { res.status(err.message.includes('Symlink escape') || err.message.includes('traversal') ? 403 : 500).json({ error: err.message }); }
 });
 
 // ─────────────────────────────────────────────────────────────────
 // DIRECTORY SIZE — async du with SSE streaming so UI stays live
 // ─────────────────────────────────────────────────────────────────
-app.get('/api/dirsize', (req, res) => {
-  const p = resolvePath(req.query.path);
-  let stat;
-  try { stat = fs.statSync(p); }
-  catch (e) { return res.status(404).json({ error: e.message }); }
-
-  // Single file — respond immediately, no streaming needed
-  if (!stat.isDirectory()) return res.json({ size: stat.size, files: 1, done: true });
-
-  // Directory — walk with Node.js (no shell dependency, works on Alpine busybox)
+app.get('/api/dirsize', async (req, res) => {
+  try {
+    const p = await resolvePath(req.query.path, true);
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -1906,7 +2584,7 @@ app.get('/api/dirsize', (req, res) => {
   const _seen = new Set(); // track real paths to avoid symlink loops
 
   // Async dir walk using a queue — never blocks the event loop
-  async function walk(dir, depth) {
+  const walk = async (dir, depth) => {
     if (aborted || depth > 50) return;
     // Track realpath for symlink loop detection
     let realDir; try { realDir = await fs.promises.realpath(dir); } catch { realDir = dir; }
@@ -1938,7 +2616,7 @@ app.get('/api/dirsize', (req, res) => {
           const s = await fs.promises.stat(full);
           totalBytes += s.size;
           totalFiles++;
-        } catch {}
+        } catch (e) { /* ignore stat error */ }
         // Yield every 500 files so HTTP stays responsive
         if (totalFiles % 500 === 0) await new Promise(r => setImmediate(r));
       }
@@ -1961,11 +2639,13 @@ app.get('/api/dirsize', (req, res) => {
   });
 
   req.on('close', () => { aborted = true; clearInterval(hb); });
+  } catch (err) {
+    res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────
 // OLLAMA INTEGRATION
-// ─────────────────────────────────────────────────────────────────
 const OLLAMA_URL   = (process.env.OLLAMA_URL || 'http://localhost:11434').replace(/\/+$/, '');
 const MODEL_TEXT   = process.env.OLLAMA_TEXT_MODEL   || 'llama3.2:1b';
 const MODEL_VISION = process.env.OLLAMA_VISION_MODEL || 'moondream:latest';
@@ -2041,7 +2721,7 @@ app.get('/api/ollama/suggest-models', async (req, res) => {
       const d = await r.json();
       installedNames = (d.models || []).map(m => m.name);
     }
-  } catch {}
+  } catch (e) { logDebug('Ollama tags fetch failed', { error: e.message }); }
 
   const hasModel = (name) => installedNames.some(n => n.startsWith(name.split(':')[0]));
 
@@ -2111,22 +2791,35 @@ async function extractFileContent(abs) {
   const ext   = path.extname(name).toLowerCase().replace('.', '');
   const mtype = mime.lookup(name) || '';
 
+  // Helper for memory-safe partial reads
+  const readPrefix = (p, max) => new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    const stream = fs.createReadStream(p, { start: 0, end: max - 1 });
+    stream.on('data', chunk => {
+      chunks.push(chunk);
+      total += chunk.length;
+      if (total >= max) stream.destroy();
+    });
+    stream.on('end', () => resolve(Buffer.concat(chunks)));
+    stream.on('error', reject);
+    stream.on('close', () => resolve(Buffer.concat(chunks)));
+  });
+
   if (IMAGE_EXTS.has(ext) || mtype.startsWith('image/')) {
     return { kind: 'image', text: '', ext, name };
   }
 
   if (TEXT_EXTS.has(ext) || mtype.startsWith('text/')) {
     try {
-      const txt = await fs.promises.readFile(abs, 'utf8');
-      return { kind: 'text', text: txt.slice(0, 14000), ext, name };
+      const buf = await readPrefix(abs, 14000);
+      return { kind: 'text', text: buf.toString('utf8'), ext, name };
     } catch (e) { return { kind: 'error', text: '', ext, name, error: e.message }; }
   }
 
   if (ext === 'pdf' || mtype === 'application/pdf') {
-    // Extract printable strings from raw PDF bytes — works without pdftotext
     try {
-      const buf = await fs.promises.readFile(abs);
-      // Pull visible ASCII runs from the PDF binary
+      const buf = await readPrefix(abs, 30000); // Take more for PDF to catch visible runs
       const raw = buf.toString('binary');
       const runs = raw.match(/[ -~\t\n\r]{5,}/g) || [];
       const text = runs.filter(s => /[a-zA-Z]{3,}/.test(s)).join(' ').replace(/\s+/g,' ').slice(0, 12000);
@@ -2136,15 +2829,16 @@ async function extractFileContent(abs) {
 
   // For directories — stat first so dotted dir names work too (e.g. /var/lib/node.js)
   try {
-    const _st = fs.statSync(abs);
+    const _st = await fs.promises.stat(abs);
     if (_st.isDirectory()) {
-      const allEntries = fs.readdirSync(abs);
+      const allEntries = await fs.promises.readdir(abs);
       const stats = { dirs: [], images: [], code: [], text: [], other: [] };
       for (const e of allEntries.slice(0, 120)) {
+        let st;
         try {
-          const st = fs.statSync(path.join(abs, e));
+          st = await fs.promises.stat(path.join(abs, e));
           if (st.isDirectory()) { stats.dirs.push(e); continue; }
-        } catch {}
+        } catch (e2) { continue; }
         const x = path.extname(e).toLowerCase().slice(1);
         if (['jpg','jpeg','png','gif','webp','svg','avif','heic'].includes(x)) stats.images.push(e);
         else if (['js','ts','py','go','rs','java','sh','c','cpp','rb','php'].includes(x)) stats.code.push(e);
@@ -2162,7 +2856,7 @@ async function extractFileContent(abs) {
       ].filter(Boolean).join('\n');
       return { kind: 'text', text: lines, ext: 'dir', name };
     }
-  } catch {}
+  } catch (e) { /* ignore stat/readdir error */ }
 
   // Unknown binary — return minimal metadata
   try {
@@ -2173,14 +2867,15 @@ async function extractFileContent(abs) {
 
 // Summarize any file
 app.post('/api/ollama/summarize', async (req, res) => {
-  const { path: p } = req.body;
-  const abs = resolvePath(p);
+  try {
+    const { path: p } = req.body;
+    const abs = await resolvePath(p, true);
 
-  let content;
-  try { content = await extractFileContent(abs); }
-  catch (e) { return res.status(400).json({ error: e.message }); }
+    let content;
+    try { content = await extractFileContent(abs); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
 
-  if (content.kind === 'error') return res.status(400).json({ error: content.error || 'Cannot read file' });
+    if (content.kind === 'error') return res.status(400).json({ error: content.error || 'Cannot read file' });
 
   if (content.kind === 'image') {
     // Redirect client to use describe-image instead
@@ -2203,199 +2898,208 @@ app.post('/api/ollama/summarize', async (req, res) => {
     log('error', '[ollama] summarize failed', { error: e.message });
     res.status(500).json({ error: e.message });
   }
+} catch (err) { res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message }); }
 });
 
 // Agent: plan file operations in a directory
 app.post('/api/ollama/agent-plan', async (req, res) => {
-  const { dir, prompt } = req.body || {};
-  const vDir = typeof dir === 'string' && dir ? dir : '/';
-  if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
-    return res.status(400).json({ error: 'Missing prompt' });
-  }
-
-  const abs = resolvePath(vDir);
-  let listing = '';
   try {
-    const entries = fs.readdirSync(abs, { withFileTypes: true }).slice(0, 200);
-    listing = entries.map(e => {
-      const mark = e.isDirectory() ? '[D]' : '[F]';
-      if (e.isDirectory()) return `${mark} ${e.name}`;
-      const ext = path.extname(e.name).toLowerCase().replace('.', '');
-      const m   = mime.lookup(e.name) || '';
-      const isImg = (m && String(m).startsWith('image/')) || IMAGE_EXTS.has(ext);
-      return `${mark} ${e.name} | ext=${ext || '-'} | mime=${m || '-'} | image=${isImg ? 'yes' : 'no'}`;
-    }).join('\n');
-  } catch (e) {
-    listing = '(unable to read directory contents)';
-  }
+    const { dir, prompt } = req.body || {};
+    const vDir = typeof dir === 'string' && dir ? dir : '/';
+    if (!prompt || typeof prompt !== 'string' || !prompt.trim()) {
+      return res.status(400).json({ error: 'Missing prompt' });
+    }
 
-  const sysPrompt = [
-    'You are a file-manager AI inside the Nova file manager.',
-    'Turn the user request into safe file operations. You can move files anywhere in the filesystem.',
-    '',
-    'Supported operations (ONLY these):',
-    '- mkdir:             create a directory.',
-    '  Fields: { "op": "mkdir", "path": "<absolute path>" }',
-    '- move:              move/rename a single file or folder.',
-    '  Fields: { "op": "move", "from": "<abs source>", "to": "<abs destination including filename>" }',
-    '- move_filter:       move items of a specific category from ONE directory to a target.',
-    '  Fields: { "op": "move_filter", "dir": "<abs dir>", "target": "<abs target dir>", "filter": "non_image_files"|"image_files"|"directories"|"files" }',
-    '- move_except_filter: move everything in a dir EXCEPT items of a category.',
-    '  Fields: { "op": "move_except_filter", "dir": "<abs dir>", "target": "<abs target dir>", "except_filter": "image_files"|"non_image_files"|"directories"|"files" }',
-    '- move_except:       move everything in a dir EXCEPT specific named files/folders.',
-    '  Fields: { "op": "move_except", "dir": "<abs dir>", "target": "<abs target dir>", "except": ["name1", "name2"] }',
-    '',
-    'Rules:',
-    '- Paths are absolute from the Nova root. Current dir is shown below.',
-    '- If the user names a destination folder that does not exist, emit a mkdir op for it FIRST.',
-    '- If user says "Downloads" resolve to /home/<user>/Downloads or the closest match visible in path.',
-    '  Current path components: ' + vDir.split('/').filter(Boolean).join(', '),
-    '- Use move_except_filter when user says "move everything except images" or "except jpegs/pngs/any image type".',
-    '- Use move_filter when user says "move only images" or "move only files".',
-    '- Use move_except when user says "except <specific filename>".',
-    '- move_filter / move_except / move_except_filter operate on immediate children of "dir" only (not recursive).',
-    '- Do NOT delete anything. Do not emit delete, copy, or chmod operations.',
-    '- If target is outside current dir, use the full absolute path (e.g. /home/user/Downloads/noob).',
-    '- Infer home directory from current path. E.g. if current is /home/zoro/Pictures/Wallpaper, home is /home/zoro.',
-    '',
-    `Current directory: ${toVirtual(abs)}`,
-    'Files in current directory (up to 200):',
-    listing || '(empty)',
-    '',
-    'Return STRICT JSON only — no markdown, no comments, no extra text:',
-    '{ "operations": [ { "op": "mkdir", "path": "..." }, { "op": "move_except_filter", "dir": "...", "target": "...", "except_filter": "image_files" } ] }',
-  ].join('\n');
+    const abs = await resolvePath(vDir, true);
+    let listing = '';
+    try {
+      const entries = (await fs.promises.readdir(abs, { withFileTypes: true })).slice(0, 200);
+      listing = entries.map(e => {
+        const mark = e.isDirectory() ? '[D]' : '[F]';
+        if (e.isDirectory()) return `${mark} ${e.name}`;
+        const ext = path.extname(e.name).toLowerCase().replace('.', '');
+        const m   = mime.lookup(e.name) || '';
+        const isImg = (m && String(m).startsWith('image/')) || IMAGE_EXTS.has(ext);
+        return `${mark} ${e.name} | ext=${ext || '-'} | mime=${m || '-'} | image=${isImg ? 'yes' : 'no'}`;
+      }).join('\n');
+    } catch (e) {
+      listing = '(unable to read directory contents)';
+    }
 
-  try {
-    const d = await ollamaFetch('/api/generate', {
-      model: MODEL_AGENT,
-      prompt: `${sysPrompt}\n\nUser request:\n${prompt.trim()}`,
-      format: 'json'
-    }, 90_000);
-    const raw = (d.response || '').trim();
-    let plan;
-    try { plan = JSON.parse(raw); }
-    catch (e) { return res.status(500).json({ error: 'AI did not return valid JSON', raw }); }
-    if (!plan || typeof plan !== 'object')
-      return res.status(500).json({ error: 'Invalid plan from AI', raw });
-    const ops = Array.isArray(plan.operations) ? plan.operations : [];
-    const safeOps = ops
-      .filter(op => op && typeof op === 'object' &&
-        (op.op === 'mkdir' || op.op === 'move' || op.op === 'move_filter' || op.op === 'move_except' || op.op === 'move_except_filter'))
-      .map(op => {
-        if (op.op === 'mkdir')              return { op: 'mkdir', path: String(op.path || '') };
-        if (op.op === 'move_filter')        return { op: 'move_filter',        dir: String(op.dir || ''), target: String(op.target || ''), filter: String(op.filter || '') };
-        if (op.op === 'move_except_filter') return { op: 'move_except_filter', dir: String(op.dir || ''), target: String(op.target || ''), except_filter: String(op.except_filter || '') };
-        if (op.op === 'move_except')        return { op: 'move_except',        dir: String(op.dir || ''), target: String(op.target || ''), except: Array.isArray(op.except) ? op.except.map(String) : [] };
-        return { op: 'move', from: String(op.from || ''), to: String(op.to || '') };
-      })
-      .filter(op => {
-        if (op.op === 'mkdir')              return op.path.startsWith('/');
-        if (op.op === 'move')               return op.from.startsWith('/') && op.to.startsWith('/');
-        if (op.op === 'move_filter')        return op.dir.startsWith('/') && op.target.startsWith('/') && !!op.filter;
-        if (op.op === 'move_except_filter') return op.dir.startsWith('/') && op.target.startsWith('/') && !!op.except_filter;
-        if (op.op === 'move_except')        return op.dir.startsWith('/') && op.target.startsWith('/') && Array.isArray(op.except);
-        return false;
-      });
-    res.json({ plan: { operations: safeOps }, raw });
-  } catch (e) {
-    log('error', '[ollama] agent-plan failed', { error: e.message });
-    res.status(500).json({ error: e.message });
-  }
+    const sysPrompt = [
+      'You are a file-manager AI inside the Nova file manager.',
+      'Turn the user request into safe file operations. You can move files anywhere in the filesystem.',
+      '',
+      'Supported operations (ONLY these):',
+      '- mkdir:             create a directory.',
+      '  Fields: { "op": "mkdir", "path": "<absolute path>" }',
+      '- move:              move/rename a single file or folder.',
+      '  Fields: { "op": "move", "from": "<abs source>", "to": "<abs destination including filename>" }',
+      '- move_filter:       move items of a specific category from ONE directory to a target.',
+      '  Fields: { "op": "move_filter", "dir": "<abs dir>", "target": "<abs target dir>", "filter": "non_image_files"|"image_files"|"directories"|"files" }',
+      '- move_except_filter: move everything in a dir EXCEPT items of a category.',
+      '  Fields: { "op": "move_except_filter", "dir": "<abs dir>", "target": "<abs target dir>", "except_filter": "image_files"|"non_image_files"|"directories"|"files" }',
+      '- move_except',       'move everything in a dir EXCEPT specific named files/folders.',
+      '  Fields: { "op": "move_except", "dir": "<abs dir>", "target": "<abs target dir>", "except": ["name1", "name2"] }',
+      '',
+      'Rules:',
+      '- Paths are absolute from the Nova root. Current dir is shown below.',
+      '- If the user names a destination folder that does not exist, emit a mkdir op for it FIRST.',
+      '- If user says "Downloads" resolve to /home/<user>/Downloads or the closest match visible in path.',
+      '  Current path components: ' + vDir.split('/').filter(Boolean).join(', '),
+      '- Use move_except_filter when user says "move everything except images" or "except jpegs/pngs/any image type".',
+      '- Use move_filter when user says "move only images" or "move only files".',
+      '- Use move_except when user says "except <specific filename>".',
+      '- move_filter / move_except / move_except_filter operate on immediate children of "dir" only (not recursive).',
+      '- Do NOT delete anything. Do not emit delete, copy, or chmod operations.',
+      '- If target is outside current dir, use the full absolute path (e.g. /home/user/Downloads/noob).',
+      '- Infer home directory from current path. E.g. if current is /home/zoro/Pictures/Wallpaper, home is /home/zoro.',
+      '- **NEW: If the user is asking a question (e.g. "how many files are here?") rather than requesting a file operation, provide a natural language answer in the "response" field.**',
+      '- **Always provide a helpful textual summary of your actions or an answer to their question in the "response" field.**',
+      '',
+      `Current directory: ${toVirtual(abs)}`,
+      'Files in current directory (up to 200):',
+      listing || '(empty)',
+      '',
+      'Return STRICT JSON only — no markdown, no comments, no extra text:',
+      '{ "response": "Your answer or explanation here", "operations": [ ... ] }',
+    ].join('\n');
+
+    try {
+      const d = await ollamaFetch('/api/generate', {
+        model: MODEL_AGENT,
+        prompt: `${sysPrompt}\n\nUser request:\n${prompt.trim()}`,
+        format: 'json'
+      }, 90_000);
+      const raw = (d.response || '').trim();
+      let plan;
+      try { plan = JSON.parse(raw); }
+      catch (e) { return res.status(500).json({ error: 'AI did not return valid JSON', raw }); }
+      if (!plan || typeof plan !== 'object')
+        return res.status(500).json({ error: 'Invalid plan from AI', raw });
+
+      const ops = Array.isArray(plan.operations) ? plan.operations : [];
+      const safeOps = ops
+        .filter(op => op && typeof op === 'object' &&
+          (op.op === 'mkdir' || op.op === 'move' || op.op === 'move_filter' || op.op === 'move_except' || op.op === 'move_except_filter'))
+        .map(op => {
+          if (op.op === 'mkdir')              return { op: 'mkdir', path: String(op.path || '') };
+          if (op.op === 'move_filter')        return { op: 'move_filter',        dir: String(op.dir || ''), target: String(op.target || ''), filter: String(op.filter || '') };
+          if (op.op === 'move_except_filter') return { op: 'move_except_filter', dir: String(op.dir || ''), target: String(op.target || ''), except_filter: String(op.except_filter || '') };
+          if (op.op === 'move_except')        return { op: 'move_except',        dir: String(op.dir || ''), target: String(op.target || ''), except: Array.isArray(op.except) ? op.except.map(String) : [] };
+          return { op: 'move', from: String(op.from || ''), to: String(op.to || '') };
+        })
+        .filter(op => {
+          if (op.op === 'mkdir')              return op.path.startsWith('/');
+          if (op.op === 'move')               return op.from.startsWith('/') && op.to.startsWith('/');
+          if (op.op === 'move_filter')        return op.dir.startsWith('/') && op.target.startsWith('/') && !!op.filter;
+          if (op.op === 'move_except_filter') return op.dir.startsWith('/') && op.target.startsWith('/') && !!op.except_filter;
+          if (op.op === 'move_except')        return op.dir.startsWith('/') && op.target.startsWith('/') && Array.isArray(op.except);
+          return false;
+        });
+
+      res.json({ plan: { operations: safeOps, response: plan.response || '' }, raw });
+    } catch (e) {
+      log('error', '[ollama] agent-plan failed', { error: e.message });
+      res.status(500).json({ error: e.message });
+    }
+  } catch (err) { res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message }); }
 });
 
 // Agent: dry-run preview — returns exactly which files would be affected, no changes made
 app.post('/api/ollama/agent-preview', async (req, res) => {
-  const { plan } = req.body || {};
-  const ops = plan && Array.isArray(plan.operations) ? plan.operations : [];
-  if (!ops.length) return res.status(400).json({ error: 'No operations to preview' });
+  try {
+    const { plan } = req.body || {};
+    const ops = plan && Array.isArray(plan.operations) ? plan.operations : [];
+    if (!ops.length) return res.status(400).json({ error: 'No operations to preview' });
 
-  const preview = [];
-  for (const op of ops) {
-    if (!op || typeof op !== 'object') continue;
-    try {
-      if (op.op === 'mkdir') {
-        const abs = resolvePath(op.path);
-        let exists = false;
-        try { await fs.promises.access(abs); exists = true; } catch {}
-        preview.push({ op: 'mkdir', path: op.path, exists, files: [] });
+    const preview = [];
+    for (const op of ops) {
+      if (!op || typeof op !== 'object') continue;
+      try {
+        if (op.op === 'mkdir') {
+          const abs = await resolvePath(op.path, true);
+          let exists = false;
+          try { await fs.promises.access(abs); exists = true; } catch (e) { /* doesn't exist */ }
+          preview.push({ op: 'mkdir', path: op.path, exists, files: [] });
 
-      } else if (op.op === 'move') {
-        const fromAbs = resolvePath(op.from);
-        let stat = null;
-        try { stat = await fs.promises.lstat(fromAbs); } catch {}
-        preview.push({
-          op: 'move', from: op.from, to: op.to,
-          exists: !!stat,
-          isDir: stat ? stat.isDirectory() : false,
-          size: stat ? stat.size : 0,
-          files: stat ? [{ name: path.basename(op.from), from: op.from, to: op.to, size: stat.size }] : []
-        });
+        } else if (op.op === 'move') {
+          const fromAbs = await resolvePath(op.from, true);
+          let stat = null;
+          try { stat = await fs.promises.lstat(fromAbs); } catch (e) { /* doesn't exist */ }
+          preview.push({
+            op: 'move', from: op.from, to: op.to,
+            exists: !!stat,
+            isDir: stat ? stat.isDirectory() : false,
+            size: stat ? stat.size : 0,
+            files: stat ? [{ name: path.basename(op.from), from: op.from, to: op.to, size: stat.size }] : []
+          });
 
-      } else if (op.op === 'move_filter' || op.op === 'move_except_filter' || op.op === 'move_except') {
-        const dirAbs    = resolvePath(op.dir);
-        const targetAbs = resolvePath(op.target);
-        let entries = [];
-        try { entries = await fs.promises.readdir(dirAbs, { withFileTypes: true }); } catch {}
+        } else if (op.op === 'move_filter' || op.op === 'move_except_filter' || op.op === 'move_except') {
+          const dirAbs    = await resolvePath(op.dir, true);
+          const targetAbs = await resolvePath(op.target, true);
+          let entries = [];
+          try { entries = await fs.promises.readdir(dirAbs, { withFileTypes: true }); } catch (e) { /* ignore readdir error */ }
 
-        const files = [];
-        for (const e of entries) {
-          const name  = e.name;
-          const ext   = path.extname(name).toLowerCase().replace('.', '');
-          const m     = mime.lookup(name) || '';
-          const isImg = (m && String(m).startsWith('image/')) || IMAGE_EXTS.has(ext);
-          let include = false;
+          const files = [];
+          for (const e of entries) {
+            const name  = e.name;
+            const ext   = path.extname(name).toLowerCase().replace('.', '');
+            const m     = mime.lookup(name) || '';
+            const isImg = (m && String(m).startsWith('image/')) || IMAGE_EXTS.has(ext);
+            let include = false;
 
-          if (op.op === 'move_filter') {
-            const f = String(op.filter || '');
-            include =
-              (f === 'directories'     && e.isDirectory()) ||
-              (f === 'files'           && e.isFile()) ||
-              (f === 'image_files'     && e.isFile() && isImg) ||
-              (f === 'non_image_files' && e.isFile() && !isImg);
-          } else if (op.op === 'move_except_filter') {
-            const excF = String(op.except_filter || '');
-            const excluded =
-              (excF === 'image_files'     && e.isFile() && isImg) ||
-              (excF === 'non_image_files' && e.isFile() && !isImg) ||
-              (excF === 'directories'     && e.isDirectory()) ||
-              (excF === 'files'           && e.isFile());
-            include = !excluded;
-          } else if (op.op === 'move_except') {
-            const exc = (op.except || []).map(n => String(n).toLowerCase());
-            include = !exc.includes(name.toLowerCase());
+            if (op.op === 'move_filter') {
+              const f = String(op.filter || '');
+              include =
+                (f === 'directories'     && e.isDirectory()) ||
+                (f === 'files'           && e.isFile()) ||
+                (f === 'image_files'     && e.isFile() && isImg) ||
+                (f === 'non_image_files' && e.isFile() && !isImg);
+            } else if (op.op === 'move_except_filter') {
+              const excF = String(op.except_filter || '');
+              const excluded =
+                (excF === 'image_files'     && e.isFile() && isImg) ||
+                (excF === 'non_image_files' && e.isFile() && !isImg) ||
+                (excF === 'directories'     && e.isDirectory()) ||
+                (excF === 'files'           && e.isFile());
+              include = !excluded;
+            } else if (op.op === 'move_except') {
+              const exc = (op.except || []).map(n => String(n).toLowerCase());
+              include = !exc.includes(name.toLowerCase());
+            }
+
+            if (include) {
+              let size = 0;
+              try { const s = await fs.promises.stat(path.join(dirAbs, name)); size = s.size; } catch (e) { /* ignore stat error */ }
+              files.push({
+                name,
+                from: toVirtual(path.join(dirAbs, name)),
+                to:   toVirtual(path.join(targetAbs, name)),
+                size,
+                isDir: e.isDirectory()
+              });
+            }
           }
-
-          if (include) {
-            let size = 0;
-            try { const s = await fs.promises.stat(path.join(dirAbs, name)); size = s.size; } catch {}
-            files.push({
-              name,
-              from: toVirtual(path.join(dirAbs, name)),
-              to:   toVirtual(path.join(targetAbs, name)),
-              size,
-              isDir: e.isDirectory()
-            });
-          }
+          preview.push({ op: op.op, dir: op.dir, target: op.target, files, total: files.length });
         }
-        preview.push({ op: op.op, dir: op.dir, target: op.target, files, total: files.length });
+      } catch (e) {
+        preview.push({ op: op.op, error: e.message, files: [] });
       }
-    } catch (e) {
-      preview.push({ op: op.op, error: e.message, files: [] });
     }
-  }
-  res.json({ preview });
+    res.json({ preview });
+  } catch (err) { res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message }); }
 });
 
-// Agent: execute a previously returned plan
-app.post('/api/ollama/agent-run', async (req, res) => {
-  const { plan } = req.body || {};
-  const ops = plan && Array.isArray(plan.operations) ? plan.operations : [];
-  if (!ops.length) return res.status(400).json({ error: 'No operations to run' });
-
+async function runAgent(job, ops) {
+  const jid = job.jobId.slice(0, 8);
+  const total = ops.length;
+  let done = 0;
   const results = [];
   const ALLOWED_OPS = new Set(['mkdir','move','move_filter','move_except','move_except_filter']);
+
   for (const op of ops) {
+    if (job.cancelRequested) break;
     if (!op || typeof op !== 'object') continue;
     if (!ALLOWED_OPS.has(op.op)) {
       results.push({ op: op.op, status: 'error', error: 'Unknown operation type — rejected' });
@@ -2403,214 +3107,279 @@ app.post('/api/ollama/agent-run', async (req, res) => {
     }
     try {
       if (op.op === 'mkdir') {
-        const abs = resolvePath(op.path);
+        const abs = await resolvePath(op.path, true);
         await fs.promises.mkdir(abs, { recursive: true });
         results.push({ op: 'mkdir', path: op.path, status: 'ok' });
+        log('info', `[${jid}] Agent: mkdir`, { path: op.path });
       } else if (op.op === 'move') {
-        const fromAbs = resolvePath(op.from);
-        const toAbs   = resolvePath(op.to);
+        const fromAbs = await resolvePath(op.from, true);
+        const toAbs   = await resolvePath(op.to, true);
+        if (isSubpath(fromAbs, toAbs)) {
+          results.push({ op: 'move', from: op.from, status: 'error', error: 'Cannot move into itself' });
+          continue;
+        }
         await fs.promises.mkdir(path.dirname(toAbs), { recursive: true });
         let finalToAbs = toAbs;
-        try { await fs.promises.access(finalToAbs); finalToAbs = await findFreeName(finalToAbs); } catch {}
-        await fs.promises.rename(fromAbs, finalToAbs);
-        results.push({ op: 'move', from: op.from, to: toVirtual(finalToAbs), status: 'ok' });
-      } else if (op.op === 'move_filter') {
-        const dirAbs    = resolvePath(op.dir);
-        const targetAbs = resolvePath(op.target);
+        
+        // Case-only rename trick
+        const oldName = path.basename(fromAbs);
+        const newName = path.basename(toAbs);
+        if (oldName.toLowerCase() === newName.toLowerCase() && oldName !== newName && path.dirname(fromAbs) === path.dirname(toAbs)) {
+           const tmp = toAbs + '.' + uuidv4().slice(0, 8) + '.tmp';
+           await fs.promises.rename(fromAbs, tmp);
+           await fs.promises.rename(tmp, toAbs);
+           results.push({ op: 'move', from: op.from, to: toVirtual(toAbs), status: 'ok' });
+        } else {
+          try { await fs.promises.access(finalToAbs); finalToAbs = await findFreeName(finalToAbs); } catch (e) { /* ignore: if access fails, file doesn't exist, use original finalToAbs */ }
+          try {
+            await fs.promises.rename(fromAbs, finalToAbs);
+          } finally {
+            releaseName(finalToAbs);
+          }
+          results.push({ op: 'move', from: op.from, to: toVirtual(finalToAbs), status: 'ok' });
+        }
+        log('info', `[${jid}] Agent: move`, { from: op.from, to: toVirtual(finalToAbs) });
+      } else if (op.op === 'move_filter' || op.op === 'move_except_filter' || op.op === 'move_except') {
+        // Backgrounding batch moves
+        const dirAbs    = await resolvePath(op.dir, true);
+        const targetAbs = await resolvePath(op.target, true);
         await fs.promises.mkdir(targetAbs, { recursive: true });
         const entries = await fs.promises.readdir(dirAbs, { withFileTypes: true });
         let moved = 0, skipped = 0;
-        for (const e of entries) {
-          const name = e.name;
-          const ext = path.extname(name).toLowerCase().replace('.', '');
-          const m   = mime.lookup(name) || '';
-          const isImg = (m && String(m).startsWith('image/')) || IMAGE_EXTS.has(ext);
-          const f = String(op.filter || '');
-          const match =
-            (f === 'directories'     && e.isDirectory()) ||
-            (f === 'files'           && e.isFile()) ||
-            (f === 'image_files'     && e.isFile() && isImg) ||
-            (f === 'non_image_files' && e.isFile() && !isImg);
-          if (!match) { skipped++; continue; }
-          let dstAbs = path.join(targetAbs, name);
-          dstAbs = await findFreeName(dstAbs);
-          await fs.promises.rename(path.join(dirAbs, name), dstAbs);
-          moved++;
-        }
-        results.push({ op: 'move_filter', dir: op.dir, target: op.target, filter: op.filter, moved, skipped, status: 'ok' });
-      } else if (op.op === 'move_except') {
-        const dirAbs    = resolvePath(op.dir);
-        const targetAbs = resolvePath(op.target);
-        await fs.promises.mkdir(targetAbs, { recursive: true });
+
+        const filter = op.filter || null;
+        const excFilter = op.except_filter || null;
         const exceptNames = (op.except || []).map(n => String(n).toLowerCase());
-        const entries = await fs.promises.readdir(dirAbs, { withFileTypes: true });
-        let moved = 0, skipped = 0;
+
         for (const e of entries) {
-          if (exceptNames.includes(e.name.toLowerCase())) { skipped++; continue; }
-          let dstAbs = path.join(targetAbs, e.name);
-          dstAbs = await findFreeName(dstAbs);
-          await fs.promises.rename(path.join(dirAbs, e.name), dstAbs);
-          moved++;
+           if (job.cancelRequested) break;
+           const name = e.name;
+           const fullPath = path.join(dirAbs, name);
+           let stat;
+           try { stat = await fs.promises.stat(fullPath); } catch (e2) { stat = null; }
+           const isDir = stat ? stat.isDirectory() : e.isDirectory();
+           const isFile = stat ? stat.isFile() : e.isFile();
+
+           if (op.op === 'move_filter') {
+              const ext = path.extname(name).toLowerCase().replace('.', '');
+              const m   = mime.lookup(name) || '';
+              const isImg = (m && String(m).startsWith('image/')) || IMAGE_EXTS.has(ext);
+              const match = (filter === 'directories' && isDir) || (filter === 'files' && isFile) || (filter === 'image_files' && isFile && isImg) || (filter === 'non_image_files' && isFile && !isImg);
+              if (!match) { skipped++; continue; }
+           } else if (op.op === 'move_except') {
+              if (exceptNames.includes(name.toLowerCase())) { skipped++; continue; }
+           } else if (op.op === 'move_except_filter') {
+              const ext = path.extname(name).toLowerCase().replace('.', '');
+              const m   = mime.lookup(name) || '';
+              const isImg = (m && String(m).startsWith('image/')) || IMAGE_EXTS.has(ext);
+              const isExcluded = (excFilter === 'image_files' && isFile && isImg) || (excFilter === 'non_image_files' && isFile && !isImg) || (excFilter === 'directories' && isDir) || (excFilter === 'files' && isFile);
+              if (isExcluded) { skipped++; continue; }
+           }
+
+           let dstAbs = path.join(targetAbs, name);
+           dstAbs = await findFreeName(dstAbs);
+           try {
+             await fs.promises.rename(fullPath, dstAbs);
+           } finally {
+             releaseName(dstAbs);
+           }
+           moved++;
         }
-        results.push({ op: 'move_except', dir: op.dir, target: op.target, except: op.except, moved, skipped, status: 'ok' });
-      } else if (op.op === 'move_except_filter') {
-        // Move everything in dir EXCEPT items matching the category
-        const dirAbs    = resolvePath(op.dir);
-        const targetAbs = resolvePath(op.target);
-        await fs.promises.mkdir(targetAbs, { recursive: true });
-        const entries = await fs.promises.readdir(dirAbs, { withFileTypes: true });
-        let moved = 0, skipped = 0;
-        const excFilter = String(op.except_filter || '');
-        for (const e of entries) {
-          const name = e.name;
-          const ext  = path.extname(name).toLowerCase().replace('.', '');
-          const m    = mime.lookup(name) || '';
-          const isImg = (m && String(m).startsWith('image/')) || IMAGE_EXTS.has(ext);
-          // Determine if this item matches the EXCLUDED category
-          const isExcluded =
-            (excFilter === 'image_files'     && e.isFile() && isImg) ||
-            (excFilter === 'non_image_files'  && e.isFile() && !isImg) ||
-            (excFilter === 'directories'      && e.isDirectory()) ||
-            (excFilter === 'files'            && e.isFile());
-          if (isExcluded) { skipped++; continue; }
-          let dstAbs = path.join(targetAbs, name);
-          dstAbs = await findFreeName(dstAbs);
-          await fs.promises.rename(path.join(dirAbs, name), dstAbs);
-          moved++;
-        }
-        results.push({ op: 'move_except_filter', dir: op.dir, target: op.target, except_filter: op.except_filter, moved, skipped, status: 'ok' });
+        results.push({ ...op, moved, skipped, status: 'ok' });
+        log('info', `[${jid}] Agent: ${op.op}`, { dir: op.dir, target: op.target, moved });
       }
     } catch (e) {
       results.push({ ...op, status: 'error', error: e.message });
     }
+    done++;
+    updateJob(job, { percent: Math.round((done / total) * 100), currentFile: `Operation ${done}/${total}` });
   }
-  res.json({ results });
+
+  const finalStatus = job.cancelRequested ? 'cancelled' : 'done';
+  updateJob(job, { 
+    status: finalStatus, 
+    percent: 100, 
+    phase: 'done', 
+    finishedAt: new Date().toISOString(),
+    results 
+  });
+}
+
+// Agent: execute a previously returned plan
+app.post('/api/ollama/agent-run', async (req, res) => {
+  try {
+    const { plan, clientId } = req.body || {};
+    const ops = plan && Array.isArray(plan.operations) ? plan.operations : [];
+    if (!ops.length) return res.status(400).json({ error: 'No operations to run' });
+
+    const job = createJob('agent-run', clientId, { 
+      ops_count: ops.length, 
+      explanation: plan.explanation || '',
+      phase: 'executing'
+    });
+
+    res.json({ jobId: job.jobId, started: true });
+    setImmediate(() => runAgent(job, ops));
+  } catch (err) { res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message }); }
 });
 app.post('/api/ollama/suggest-name', async (req, res) => {
-  const { path: p } = req.body;
-  const abs = resolvePath(p);
-
-  let content;
-  try { content = await extractFileContent(abs); }
-  catch (e) { return res.status(400).json({ error: e.message }); }
-
-  if (content.kind === 'error') return res.status(400).json({ error: content.error || 'Cannot read file' });
-
-  const ext   = path.extname(abs);
-  const input = content.kind === 'image'
-    ? `Image file named: ${content.name}`
-    : content.text.slice(0, 6000) || `File: ${content.name}`;
-
-  log('info', '[ollama] suggest-name', { file: content.name, model: MODEL_TEXT });
   try {
-    const d = await ollamaFetch('/api/generate', {
-      model: MODEL_TEXT,
-      prompt: `Suggest ONE short descriptive filename (no extension, use hyphens not spaces, lowercase). Reply with only the filename.\nFile: ${content.name}\nContent: ${input}`
-    }, 60_000);
-    const raw  = (d.response || '').trim().split('\n')[0]
-                   .replace(/[^a-zA-Z0-9_\-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-    res.json({ name: (raw || 'unnamed') + ext });
-  } catch (e) {
-    log('error', '[ollama] suggest-name failed', { error: e.message });
-    res.status(500).json({ error: e.message });
-  }
+    const { path: p } = req.body;
+    const abs = await resolvePath(p, true);
+
+    let content;
+    try { content = await extractFileContent(abs); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+
+    if (content.kind === 'error') return res.status(400).json({ error: content.error || 'Cannot read file' });
+
+    const ext   = path.extname(abs);
+    const input = content.kind === 'image'
+      ? `Image file named: ${content.name}`
+      : content.text.slice(0, 6000) || `File: ${content.name}`;
+
+    log('info', '[ollama] suggest-name', { file: content.name, model: MODEL_TEXT });
+    try {
+      const d = await ollamaFetch('/api/generate', {
+        model: MODEL_TEXT,
+        prompt: `Suggest ONE short descriptive filename (no extension, use hyphens not spaces, lowercase). Reply with only the filename.\nFile: ${content.name}\nContent: ${input}`
+      }, 60_000);
+      const raw  = (d.response || '').trim().split('\n')[0]
+                     .replace(/[^a-zA-Z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+      res.json({ name: (raw || 'unnamed') + ext });
+    } catch (e) {
+      log('error', '[ollama] suggest-name failed', { error: e.message });
+      res.status(500).json({ error: e.message });
+    }
+  } catch (err) { res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message }); }
 });
 
 // Tag any file
 app.post('/api/ollama/tag', async (req, res) => {
-  const { path: p } = req.body;
-  const abs = resolvePath(p);
-
-  let content;
-  try { content = await extractFileContent(abs); }
-  catch (e) { return res.status(400).json({ error: e.message }); }
-
-  if (content.kind === 'error') return res.status(400).json({ error: content.error || 'Cannot read file' });
-
-  const input = content.kind === 'image'
-    ? `Image file: ${content.name}`
-    : content.text.slice(0, 8000) || `File: ${content.name}`;
-
-  log('info', '[ollama] tag', { file: content.name, model: MODEL_TEXT });
   try {
-    const d = await ollamaFetch('/api/generate', {
-      model: MODEL_TEXT,
-      prompt: `Return 3-6 lowercase single-word tags, comma-separated. Only tags, nothing else.\nFile: ${content.name}\n${input}`
-    }, 60_000);
-    const tags = (d.response || '').replace(/[^a-z0-9,\- ]/gi, '').split(',')
-                   .map(t => t.trim().toLowerCase()).filter(t => t.length > 1).slice(0, 8);
-    res.json({ tags });
-  } catch (e) {
-    log('error', '[ollama] tag failed', { error: e.message });
-    res.status(500).json({ error: e.message });
-  }
+    const { path: p } = req.body;
+    const abs = await resolvePath(p, true);
+
+    let content;
+    try { content = await extractFileContent(abs); }
+    catch (e) { return res.status(400).json({ error: e.message }); }
+
+    if (content.kind === 'error') return res.status(400).json({ error: content.error || 'Cannot read file' });
+
+    const input = content.kind === 'image'
+      ? `Image file: ${content.name}`
+      : content.text.slice(0, 8000) || `File: ${content.name}`;
+
+    log('info', '[ollama] tag', { file: content.name, model: MODEL_TEXT });
+    try {
+      const d = await ollamaFetch('/api/generate', {
+        model: MODEL_TEXT,
+        prompt: `Return 3-6 lowercase single-word tags, comma-separated. Only tags, nothing else.\nFile: ${content.name}\n${input}`
+      }, 60_000);
+      const tags = (d.response || '').replace(/[^a-z0-9,\- ]/gi, '').split(',')
+                     .map(t => t.trim().toLowerCase()).filter(t => t.length > 1).slice(0, 8);
+      res.json({ tags });
+    } catch (e) {
+      log('error', '[ollama] tag failed', { error: e.message });
+      res.status(500).json({ error: e.message });
+    }
+  } catch (err) { res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message }); }
 });
 
 // Describe image (vision model)
 app.post('/api/ollama/describe-image', async (req, res) => {
-  const { path: p } = req.body;
-  const abs  = resolvePath(p);
-  const name = path.basename(abs);
-  let b64;
-  try { b64 = fs.readFileSync(abs).toString('base64'); }
-  catch (e) { return res.status(400).json({ error: 'Cannot read image: ' + e.message }); }
-
-  log('info', '[ollama] describe-image', { file: name, model: MODEL_VISION });
   try {
-    const d = await ollamaFetch('/api/generate', {
-      model:  MODEL_VISION,
-      prompt: 'Describe this image in 2-3 sentences. Mention subjects, colors, mood.',
-      images: [b64]
-    }, 90_000);
-    res.json({ description: (d.response || '').trim() });
-  } catch (e) {
-    log('error', '[ollama] describe-image failed', { error: e.message });
-    res.status(500).json({ error: e.message });
-  }
+    const { path: p } = req.body;
+    const abs  = await resolvePath(p, true);
+    const name = path.basename(abs);
+    
+    // Guard: refuse to load very large images into memory (>25MB)
+    try {
+      const imgStat = await fs.promises.stat(abs);
+      if (imgStat.size > 25 * 1024 * 1024) {
+        return res.status(400).json({ error: `Image too large for vision model (${Math.round(imgStat.size/1024/1024)}MB > 25MB limit)` });
+      }
+    } catch (e) { return res.status(404).json({ error: 'Image not found: ' + e.message }); }
+
+    let b64;
+    try { b64 = (await fs.promises.readFile(abs)).toString('base64'); }
+    catch (e) { return res.status(400).json({ error: 'Cannot read image: ' + e.message }); }
+
+    log('info', '[ollama] describe-image', { file: name, model: MODEL_VISION });
+    try {
+      const d = await ollamaFetch('/api/generate', {
+        model:  MODEL_VISION,
+        prompt: 'Describe this image in 2-3 sentences. Mention subjects, colors, mood.',
+        images: [b64]
+      }, 90_000);
+      res.json({ description: (d.response || '').trim() });
+    } catch (e) {
+      log('error', '[ollama] describe-image failed', { error: e.message });
+      res.status(500).json({ error: e.message });
+    }
+  } catch (err) { res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message }); }
 });
 
 // Semantic search with nomic-embed-text
 app.post('/api/ollama/search', async (req, res) => {
-  const { query, dir } = req.body;
-  if (!query || !dir) return res.status(400).json({ error: 'Missing query or dir' });
-  const absDir = resolvePath(dir);
-  log('info', '[ollama] search', { query, dir, model: MODEL_EMBED });
-
-  let queryEmbed;
   try {
-    const qd = await ollamaFetch('/api/embeddings', { model: MODEL_EMBED, prompt: query }, 30_000);
-    queryEmbed = qd.embedding;
-  } catch (e) { return res.status(500).json({ error: 'Embedding failed: ' + e.message }); }
+    const { query: searchQuery, dir, showHidden } = req.body;
+    if (!searchQuery || !dir) return res.status(400).json({ error: 'Missing query or dir' });
+    const absDir = await resolvePath(dir, true);
+    log('info', '[ollama] search', { query: searchQuery, dir, model: MODEL_EMBED });
 
-  let entries;
-  try { entries = fs.readdirSync(absDir, { withFileTypes: true }); }
-  catch (e) { return res.status(500).json({ error: e.message }); }
-
-  const scored = [];
-  for (const entry of entries.filter(e => e.isFile())) {
-    const full = path.join(absDir, entry.name);
-    const content = await extractFileContent(full).catch(() => null);
-    if (!content || content.kind === 'error' || content.kind === 'binary' || !content.text.trim()) continue;
-    const textChunk = content.kind === 'image'
-      ? `image file: ${entry.name}`
-      : content.text.slice(0, 3000);
+    let queryEmbed;
     try {
-      const fd = await ollamaFetch('/api/embeddings', { model: MODEL_EMBED, prompt: textChunk }, 20_000);
-      const de = fd.embedding;
-      const dot  = queryEmbed.reduce((s, v, i) => s + v * de[i], 0);
-      const magQ = Math.sqrt(queryEmbed.reduce((s, v) => s + v*v, 0));
-      const magD = Math.sqrt(de.reduce((s, v) => s + v*v, 0));
-      scored.push({ name: entry.name, path: toVirtual(full), score: magQ && magD ? dot / (magQ * magD) : 0 });
-    } catch { continue; }
-  }
-  scored.sort((a, b) => b.score - a.score);
-  res.json({ results: scored.slice(0, 10) });
+      const qd = await ollamaFetch('/api/embeddings', { model: MODEL_EMBED, prompt: searchQuery }, 30_000);
+      queryEmbed = qd.embedding;
+    } catch (e) { return res.status(500).json({ error: 'Embedding failed: ' + e.message }); }
+
+    let entries;
+    try { entries = await fs.promises.readdir(absDir, { withFileTypes: true }); }
+    catch (e) { return res.status(500).json({ error: e.message }); }
+
+    const scored = [];
+    for (const entry of entries.filter(e => e.isFile())) {
+      if (!showHidden && entry.name.startsWith('.')) continue; // Filter dotfiles if hidden
+      const full = path.join(absDir, entry.name);
+      try {
+        const stats = await fs.promises.stat(full);
+        const mtime = stats.mtime.getTime();
+        
+        // Check cache
+        const cached = await query(`SELECT embedding FROM embeddings WHERE filePath = ? AND mtime = ? AND model = ?`, 
+                                   [full, mtime, MODEL_EMBED]);
+        
+        let de;
+        if (cached.length > 0) {
+          de = JSON.parse(cached[0].embedding);
+        } else {
+          const content = await extractFileContent(full).catch(() => null);
+          if (!content || content.kind === 'error' || content.kind === 'binary' || !content.text.trim()) continue;
+          const textChunk = content.kind === 'image' ? `image file: ${entry.name}` : content.text.slice(0, 3000);
+          
+          const fd = await ollamaFetch('/api/embeddings', { model: MODEL_EMBED, prompt: textChunk }, 20_000);
+          de = fd.embedding;
+          
+          await run(`INSERT OR REPLACE INTO embeddings (filePath, mtime, model, embedding) VALUES (?, ?, ?, ?)`,
+                    [full, mtime, MODEL_EMBED, JSON.stringify(de)]);
+        }
+
+        const dot  = queryEmbed.reduce((s, v, i) => s + v * de[i], 0);
+        const magQ = Math.sqrt(queryEmbed.reduce((s, v) => s + v*v, 0));
+        const magD = Math.sqrt(de.reduce((s, v) => s + v*v, 0));
+        scored.push({ name: entry.name, path: toVirtual(full), score: magQ && magD ? dot / (magQ * magD) : 0 });
+      } catch (e) { logDebug('search item failed', { file: entry.name, error: e.message }); continue; }
+    }
+    scored.sort((a, b) => b.score - a.score);
+    res.json({ results: scored.slice(0, 10) });
+  } catch (err) { res.status(err.message.includes('Symlink escape') ? 403 : 500).json({ error: err.message }); }
 });
 
 // ─────────────────────────────────────────────────────────────────
 // CATCH-ALL — must be LAST, after every /api/* route is registered
 // ─────────────────────────────────────────────────────────────────
-app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
+app.get('*', async (req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
 server.listen(PORT, () => {
   log('info', 'Nova File Manager started', {

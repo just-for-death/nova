@@ -1,18 +1,17 @@
 FROM node:20-alpine
 
-RUN apk add --no-cache rsync bash util-linux coreutils findutils unzip
+RUN apk add --no-cache rsync bash util-linux coreutils findutils unzip build-base python3
 
 WORKDIR /app
 
-COPY package.json ./
+COPY package*.json package-lock.json ./
 RUN npm install --production
-
-COPY server.js ./
 RUN mkdir -p ./public
 
 # Copy UI and all static assets (favicon, manifest, logos)
-COPY index.html ./public/
+COPY index.html login.html ./
 COPY public/ ./public/
+COPY server.js ./
 
 EXPOSE 9898
 

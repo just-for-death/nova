@@ -64,9 +64,8 @@
 <meta name="description" content="Nova — a fast, modern self-hosted file manager">
 <meta name="robots" content="noindex, nofollow">
 
-<!-- Fonts -->
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<!-- High-performance system-native fonts with Lora/Plex fallbacks -->
+<!-- <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet"> -->
 <style>
 :root {
   --bg:        #1a1916;
@@ -91,9 +90,9 @@
   --radius:    10px;
   --rsm:       6px;
   --tr:        0.14s ease;
-  --font-serif: 'Lora', ui-serif, Georgia, Cambria, serif;
-  --font-sans:  'IBM Plex Sans', system-ui, sans-serif;
-  --font-mono:  'IBM Plex Mono', 'Fira Code', monospace;
+  --font-serif: 'Lora', ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif;
+  --font-sans:  'Inter', 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono:  'IBM Plex Mono', 'Fira Code', 'JetBrains Mono', 'SF Mono', 'Roboto Mono', 'Ubuntu Mono', 'Menlo', 'Monaco', 'Consolas', monospace;
   /* Safe area insets (filled by browser in standalone PWA) */
   --safe-top:    env(safe-area-inset-top, 0px);
   --safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -451,6 +450,7 @@ body {
   font-size: 12.5px; color: var(--text); font-weight: 400;
   word-break: break-word; line-height: 1.35;
   display: -webkit-box; -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical; overflow: hidden;
   font-family: var(--font-sans);
 }
@@ -1390,6 +1390,9 @@ body.multiselect-mode .item-cb-list { opacity: 1 !important; }
       <div class="sb-item" onclick="showSettings()" style="margin:0" data-sbicon="settings">
         <span class="sb-icon"></span>Settings
       </div>
+      <div class="sb-item" onclick="logout()" style="margin:0" data-sbicon="logout">
+        <span class="sb-icon"></span>Logout
+      </div>
     </div>
   </div>
 
@@ -1415,6 +1418,10 @@ body.multiselect-mode .item-cb-list { opacity: 1 !important; }
       <button class="tb-btn-txt" id="btn-copy" style="display:none" onclick="copySel()">
         <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><rect x="5" y="5" width="7.5" height="7.5" rx="1.5" stroke="currentColor" stroke-width="1.4"/><path d="M1.5 9.5V2.5a1 1 0 0 1 1-1h7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
         Copy
+      </button>
+      <button class="tb-btn-txt" id="btn-download" style="display:none" onclick="dlMultiSel()">
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="M11 6.5 7 10.5 3 6.5M7 1.5v9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M1 12.5h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        Download
       </button>
       <button class="tb-btn-txt" id="btn-paste" style="display:none" onclick="doPaste()">
         <svg width="13" height="13" viewBox="0 0 14 14" fill="none"><rect x="2" y="3" width="10" height="10" rx="1.5" stroke="currentColor" stroke-width="1.4"/><path d="M5 3V2a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/><path d="M5 7.5h4M7 5.5v4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
@@ -1517,6 +1524,7 @@ const SB = {
   settings:`<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="2.5" stroke="currentColor" stroke-width="1.4"/><path d="M8 1v1.5M8 13.5V15M1 8h1.5M13.5 8H15M3.1 3.1l1.1 1.1M11.8 11.8l1.1 1.1M12.9 3.1l-1.1 1.1M4.2 11.8l-1.1 1.1" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`,
   pin:     `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 2 6 6l-3.5 1 .5 1 2.5-.5L8 10.5 6 14l1 .5 2.5-4 3 2.5 1-.5-.5-2.5 1-3z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>`,
   folder:  `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M1.5 4.5A1.5 1.5 0 0 1 3 3h3.5l1.5 2H13a1.5 1.5 0 0 1 1.5 1.5v6A1.5 1.5 0 0 1 13 14H3a1.5 1.5 0 0 1-1.5-1.5z" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>`,
+  logout:  `<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M10 3a5 5 0 1 1-4 0M8 2v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
 };
 
 // Inject sidebar SVG icons from data-sbicon attributes
@@ -1543,6 +1551,44 @@ const EDITABLE_EXTS_UI = new Set([
 // ═══════════════════════════════════════════
 // STATE
 // ═══════════════════════════════════════════
+function getCsrf() {
+  const matches = document.cookie.match(/nova_csrf_token=([^;]+)/);
+  return matches ? matches[1] : '';
+}
+
+/**
+ * Centralized API fetch wrapper
+ * Handles: CSRF tokens, 401 Session Expiry, and Uniform Error Handling
+ */
+async function api(url, opts = {}) {
+  const headers = {
+    'Content-Type': 'application/json',
+    'X-Nova-CSRF':   getCsrf(),
+    ...(opts.headers || {})
+  };
+  
+  try {
+    const res = await fetch(url, { ...opts, headers });
+    
+    if (res.status === 401) {
+      toast('Session expired. Redirecting...', 'err');
+      setTimeout(() => window.location.reload(), 1500);
+      return null;
+    }
+    
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `HTTP ${res.status}`);
+    }
+    
+    return await res.json();
+  } catch (e) {
+    if (e.message !== 'The user aborted a request.') {
+      toast(e.message, 'err');
+    }
+    throw e;
+  }
+}
 let curPath = '/';
 let hist = ['/'], histIdx = 0;
 let entries = [], filtered = [];
@@ -1566,12 +1612,21 @@ if (!wsId) {
   localStorage.setItem('nova_wsId', wsId);
 }
 
+let wsBackoff = 0;
 function initWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${proto}://${location.host}`);
-  ws.onopen = () => ws.send(JSON.stringify({ type: 'register', clientId: wsId }));
+  const token = getCsrf();
+  ws = new WebSocket(`${proto}://${location.host}/ws?token=${enc(token)}`);
+  ws.onopen = () => {
+    wsBackoff = 0; // Reset backoff on successful connection
+    ws.send(JSON.stringify({ type: 'register', clientId: wsId }));
+  };
   ws.onmessage = ev => { try { handleWS(JSON.parse(ev.data)); } catch {} };
-  ws.onclose = () => setTimeout(initWS, 2500);
+  ws.onclose = () => {
+    const delay = Math.min(2000 * Math.pow(1.5, wsBackoff), 60000);
+    wsBackoff++;
+    setTimeout(initWS, delay);
+  };
 }
 
 const finishedJobs = new Set(); // track notified jobs to prevent double-fire
@@ -1587,12 +1642,13 @@ function handleWS(msg) {
     if (job.status === 'done' && !finishedJobs.has(job.jobId)) {
       finishedJobs.add(job.jobId);
       hideCancelBtn();
-      setTimeout(() => closeProgress(), 2500);
+      setTimeout(() => { if (![...activeJobs.values()].some(j => j.status === 'running')) closeProgress(); }, 2500);
       const label = job.type === 'delete' || job.type === 'delete-permanent' ? '🗑 Delete complete'
                   : job.type === 'trash-empty' ? '🗑 Trash emptied'
                   : job.type === 'upload'       ? `✓ Upload saved (${(job.sources||[]).length} file(s))`
                   : job.type === 'zip'           ? '🗜 Zip complete'
                   : job.type === 'unzip'         ? '📦 Extracted successfully'
+                  : job.type === 'agent-run'     ? '✦ AI Agent complete'
                   : `✓ ${job.operation === 'move' ? 'Move' : 'Copy'} complete`;
       toast(label, 'ok');
       reload(); loadTrash();
@@ -1616,6 +1672,7 @@ function handleWS(msg) {
 // NAVIGATION
 // ═══════════════════════════════════════════
 async function nav(p) {
+  const old = curPath;
   curPath = p;
   if (histIdx < hist.length - 1) hist = hist.slice(0, histIdx + 1);
   if (hist[histIdx] !== p) { hist.push(p); histIdx++; }
@@ -1623,12 +1680,41 @@ async function nav(p) {
     await loadDir(p);
   } catch(e) {
     toast('⚠ Navigation failed: ' + e.message, 'err');
-    // Roll back history on failure
-    hist.pop(); histIdx = Math.max(0, histIdx - 1); curPath = hist[histIdx] || '/';
+    // Roll back history
+    hist.pop(); 
+    histIdx = Math.max(0, histIdx - 1); 
+    const fallback = hist[histIdx] || '/';
+    curPath = fallback;
+    if (fallback !== p) {
+      loadDir(fallback).catch(() => {
+        // Absolute fallback to root if even the history target is gone
+        curPath = '/';
+        hist = ['/'];
+        histIdx = 0;
+        loadDir('/');
+      });
+    }
   }
   navBtns(); sidebarActive();
-  // Close mobile sidebar drawer after navigation
   if (typeof closeMobileSidebar === 'function' && window.innerWidth <= 600) closeMobileSidebar();
+}
+
+async function refresh() {
+  setLoading(true);
+  try {
+    const data = await api(`/api/list?path=${enc(curPath)}`);
+    if (!data) return; // handled by api wrapper (401 redirect)
+    entries = data.entries || [];
+    render();
+    if (curPath === '/') {
+      const mdata = await api(`/api/mounts`);
+      if (mdata) renderMounts(mdata);
+    }
+  } catch (e) {
+    // Already toasted by api()
+  } finally {
+    setLoading(false);
+  }
 }
 
 function goBack() { if (histIdx > 0) { histIdx--; curPath = hist[histIdx]; loadDir(curPath).catch(e => toast('⚠ ' + e.message, 'err')); navBtns(); } }
@@ -1695,7 +1781,8 @@ async function loadDir(p) {
   setStatus('Loading…', false);
   selected.clear(); selUI();
   try {
-    const r = await fetch(`/api/list?path=${enc(p)}`);
+    const showHidden = getSetting('showHidden');
+    const r = await fetch(`/api/list?path=${enc(p)}&showHidden=${showHidden}`);
     const d = await r.json();
     if (d.error) throw new Error(d.error);
     entries  = sortEntries(d.entries);
@@ -1928,13 +2015,14 @@ function clickItem(ev, p, type) {
   lastSel = p; renderFiles(); selUI();
 }
 function dblItem(p, type) {
+  const e = filtered.find(x => x.path === p);
   if (type === 'directory' || type === 'symlink-dir') { nav(p); return; }
   if (type === 'symlink-broken') {
-    const entry = filtered.find(x => x.path === p);
     toast('Broken symlink → right-click to fix or delete', 'warn');
     return;
   }
-  const ext = p.split('.').pop().toLowerCase();
+  // For files and symlink-files, check extension/mime
+  const ext = (e?.name || p).split('.').pop().toLowerCase();
   if (EDITABLE_EXTS_UI.has(ext)) { openEditor(p); return; }
   previewFile(p);
 }
@@ -1942,7 +2030,7 @@ function _selUIDesktop() {
   const n = selected.size;
   const ssEl = document.getElementById('ssel');
   if (ssEl) ssEl.textContent = n > 0 ? `${n} selected` : '';
-  ['btn-cut','btn-copy','btn-del'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = n?'':'none'; });
+  ['btn-cut','btn-copy','btn-download','btn-del'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = n?'':'none'; });
   const ppEl = document.getElementById('btn-paste');
   if (ppEl) ppEl.style.display = clipboard?'':'none';
   const selAllBtn = document.getElementById('btn-selall');
@@ -1988,7 +2076,7 @@ async function doTransfer(sources, destination, operation, conflictResolutions =
   let checkData;
   try {
     const cr = await fetch('/api/transfer/check', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ sources, destination })
     });
     checkData = await cr.json();
@@ -2009,7 +2097,7 @@ async function _startTransfer(sources, destination, operation, conflictResolutio
   showProgressPanel(`${operation==='move'?'Moving':'Copying'} ${sources.length} item(s)`);
   try {
     const r = await fetch('/api/transfer', {
-      method:'POST', headers:{'Content-Type':'application/json'},
+      method:'POST', headers:{'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ sources, destination, operation, clientId: wsId, conflictResolutions })
     });
     const d = await r.json();
@@ -2202,7 +2290,7 @@ function delSel() {
     label: 'Move to Trash', cls: 'bad',
     onOk: async () => {
       try {
-        const r = await fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths:items.map(i=>i.path),clientId:wsId})});
+        const r = await fetch('/api/delete',{method:'POST',headers:{'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},body:JSON.stringify({paths:items.map(i=>i.path),clientId:wsId})});
         const d = await r.json();
         selected.clear(); selUI(); reload(); loadTrash();
         if (d.jobId) {
@@ -2226,7 +2314,7 @@ function permDel() {
     label: 'Delete Forever', cls: 'bad',
     onOk: async () => {
       try {
-        const r = await fetch('/api/delete-permanent',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths:items.map(i=>i.path),clientId:wsId})});
+        const r = await fetch('/api/delete-permanent',{method:'POST',headers:{'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},body:JSON.stringify({paths:items.map(i=>i.path),clientId:wsId})});
         const d = await r.json();
         selected.clear(); selUI(); reload();
         if (d.jobId) {
@@ -2275,7 +2363,7 @@ function showTrash() {
 }
 async function restoreItem(id) {
   try {
-    const r = await fetch('/api/trash/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+    const r = await fetch('/api/trash/restore',{method:'POST',headers:{'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},body:JSON.stringify({id})});
     const d = await r.json();
     if (d.error) { toast('⚠ Restore failed: ' + d.error, 'err'); return; }
     closeModal(); reload(); loadTrash(); toast('✓ Restored','ok');
@@ -2285,7 +2373,7 @@ async function emptyTrash() {
   confirm2({ title:'Empty Trash?', msg:'All trashed items will be permanently deleted.', label:'Empty', cls:'bad',
     onOk: async () => {
       try {
-        const r = await fetch('/api/trash/empty',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({clientId:wsId})});
+        const r = await fetch('/api/trash/empty',{method:'POST',headers:{'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},body:JSON.stringify({clientId:wsId})});
         const d = await r.json();
         closeModal(); loadTrash();
         if (d.jobId) {
@@ -2382,14 +2470,33 @@ async function showJobs() {
     </div>`;
   }
 
+  m.style.maxWidth = '580px'; m.style.minWidth = '460px';
+  m.style.maxHeight = '90vh';
+
+  const active = jobs.filter(j => j.status === 'running');
+  const history = jobs.filter(j => j.status !== 'running').slice(0, 50);
+
   m.innerHTML = `<h2>&#9881; Background Jobs</h2>
-    <p style="margin-bottom:14px">Transfer jobs run server-side and survive browser disconnects.</p>
-    <div style="max-height:420px;overflow-y:auto;margin-bottom:16px;padding-right:2px">
-      ${!jobs.length
-        ? '<div style="text-align:center;color:var(--text3);padding:32px;font-style:italic;font-family:var(--font-serif)">No jobs yet</div>'
-        : [...jobs].reverse().map(j=>jobHtml(j)).join('')}
+    <p style="margin-bottom:14px;font-size:12.5px;color:var(--text3)">Transfer jobs run server-side and survive browser disconnects. Showing up to 50 recent historical entries.</p>
+    
+    <div style="overflow-y:auto;max-height:calc(90vh - 160px);padding-right:4px">
+      ${active.length ? `
+        <div style="font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--accent2);margin-bottom:10px;padding-left:4px">Active Jobs (${active.length})</div>
+        ${active.map(j => jobHtml(j)).join('')}
+        <div style="height:16px"></div>
+      ` : ''}
+
+      ${history.length ? `
+        <div style="font-size:10px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:var(--text3);margin-bottom:10px;padding-left:4px">History</div>
+        <div style="opacity:0.85">${history.map(j => jobHtml(j)).join('')}</div>
+      ` : ''}
+
+      ${(!active.length && !history.length) ? `
+        <div style="text-align:center;color:var(--text3);padding:48px 32px;font-style:italic;font-family:var(--font-serif)">No jobs yet</div>
+      ` : ''}
     </div>
-    <div class="modal-row">
+
+    <div class="modal-row" style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
       <button class="mbtn" onclick="closeModal();setTimeout(showJobs,10)" style="margin-right:auto">&#8635; Refresh</button>
       <button class="mbtn" onclick="closeModal()">Close</button>
     </div>`;
@@ -2410,7 +2517,7 @@ async function doMkdir() {
   const name = document.getElementById('mkdir-val').value.trim();
   if (!name) return;
   try {
-    const r = await fetch('/api/mkdir',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:curPath,name})});
+    const r = await fetch('/api/mkdir',{method:'POST',headers:{'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},body:JSON.stringify({path:curPath,name})});
     const d = await r.json();
     if (d.error) { toast('⚠ ' + d.error, 'err'); return; }
     closeModal(); reload(); toast('📁 Created','ok');
@@ -2430,7 +2537,7 @@ async function doNewFile() {
   const p = curPath.replace(/\/+$/,'') + '/' + name;
   const ext = name.split('.').pop().toLowerCase();
   try {
-    const r = await fetch('/api/file/write',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:p,content:''})});
+    const r = await fetch('/api/file/write',{method:'POST',headers:{'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},body:JSON.stringify({path:p,content:''})});
     if (!r.ok) { const d = await r.json(); toast('⚠ ' + (d.error||'Failed'), 'err'); return; }
     closeModal(); reload(); toast('✓ Created: ' + name, 'ok');
     if (EDITABLE_EXTS_UI.has(ext)) setTimeout(() => openEditor(p), 300);
@@ -2447,7 +2554,7 @@ async function doRename(p) {
   const n = document.getElementById('ren-val').value.trim();
   if (!n) return;
   try {
-    const r = await fetch('/api/rename',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({oldPath:p,newName:n})});
+    const r = await fetch('/api/rename',{method:'POST',headers:{'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},body:JSON.stringify({oldPath:p,newName:n})});
     const d = await r.json();
     if (d.error) { toast('⚠ ' + d.error, 'err'); return; }
     closeModal(); reload(); toast('✓ Renamed','ok');
@@ -2474,8 +2581,10 @@ function ctxMenu(ev, p, type) {
     if (EDITABLE_EXTS_UI.has(ext)) {
       menuItems.push({icon:'✏', label:'Edit',    fn:()=>openEditor(p)});
     }
-    menuItems.push({icon:'👁', label:'Preview',  fn:()=>previewFile(p)},
-                   {icon:'↓', label:'Download',  fn:()=>dlFile(p)});
+    menuItems.push({icon:'👁', label:'Preview',  fn:()=>previewFile(p)});
+  }
+  if (!multi) {
+    menuItems.push({icon:'↓', label:'Download',  fn:()=>dlFile(p)});
   }
   menuItems.push({sep:true});
   menuItems.push({icon:'⎘', label:'Copy',          fn:()=>copySel()});
@@ -2710,7 +2819,7 @@ async function dlMultiSel() {
   toast(`⏳ Preparing zip of ${sel.length} items…`, 'ok');
   try {
     const r = await fetch('/api/zip', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ sources: sel, destination: destPath, clientId: wsId })
     });
     const d = await r.json();
@@ -2735,7 +2844,7 @@ async function dlMultiSel() {
     setTimeout(async () => {
       try {
         await fetch('/api/delete-permanent', {
-          method: 'POST', headers: {'Content-Type':'application/json'},
+          method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
           body: JSON.stringify({ paths: [destPath] })
         });
       } catch {}
@@ -2957,7 +3066,7 @@ async function saveEditor() {
   if (st) { st.textContent = 'Saving\u2026'; st.style.color = 'var(--yellow)'; }
   try {
     const r = await fetch('/api/file/write', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Nova-CSRF': getCsrf() },
       body: JSON.stringify({ path: tab.path, content: tab.content })
     });
     const d = await r.json();
@@ -3016,7 +3125,7 @@ async function startZip(items) {
 
   try {
     const r = await fetch('/api/zip', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json', 'X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ sources: items, destination, clientId: wsId })
     });
     const d = await r.json();
@@ -3051,7 +3160,7 @@ async function startUnzip(p) {
   const name = p.split('/').pop();
   try {
     const r = await fetch('/api/unzip', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ path: p, destination, clientId: wsId })
     });
     const d = await r.json();
@@ -3127,7 +3236,7 @@ async function aiSummarize(p, name) {
   const m = aiLoading('✦ AI Summary', name);
   try {
     const r  = await fetch('/api/ollama/summarize', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ path: p })
     });
     const d = await r.json();
@@ -3150,7 +3259,7 @@ async function aiSuggestName(p, name) {
   const m = aiLoading('✦ AI Rename Suggestion', name);
   try {
     const r = await fetch('/api/ollama/suggest-name', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ path: p })
     });
     const d = await r.json();
@@ -3172,7 +3281,7 @@ async function applyAIRename(p, newName) {
   closeModal();
   try {
     const r = await fetch('/api/rename', {
-      method:'POST', headers:{'Content-Type':'application/json'},
+      method:'POST', headers:{'Content-Type':'application/json', 'X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ oldPath: p, newName })
     });
     const d = await r.json();
@@ -3185,7 +3294,7 @@ async function aiTag(p, name) {
   const m = aiLoading('✦ AI Tags', name);
   try {
     const r = await fetch('/api/ollama/tag', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ path: p })
     });
     const d = await r.json();
@@ -3207,7 +3316,7 @@ async function aiDescribeImage(p, name) {
   const m = aiLoading('✦ AI Image Description', name);
   try {
     const r = await fetch('/api/ollama/describe-image', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ path: p })
     });
     const d = await r.json();
@@ -3226,7 +3335,7 @@ async function aiDescribeImage(p, name) {
 async function aiAgentPlan(dir, instruction) {
   try {
     const r = await fetch('/api/ollama/agent-plan', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json', 'X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ dir, prompt: instruction })
     });
     const d = await r.json();
@@ -3237,8 +3346,8 @@ async function aiAgentPlan(dir, instruction) {
 async function aiAgentRun(plan) {
   try {
     const r = await fetch('/api/ollama/agent-run', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ plan })
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
+      body: JSON.stringify({ plan, clientId: wsId })
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || 'Execution failed');
@@ -3264,7 +3373,7 @@ async function deleteBrokenSymlink(p) {
   if (!confirm(`Delete this broken symlink?\n\n${p}\n\nThis only removes the link, not any target file.`)) return;
   try {
     const r = await fetch('/api/delete-permanent', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ paths: [p] })
     });
     const d = await r.json();
@@ -3280,7 +3389,7 @@ async function fixBrokenSymlink(p, currentTarget) {
   if (!newTarget || !newTarget.trim()) return;
   try {
     const r = await fetch('/api/symlink/recreate', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ path: p, target: newTarget.trim() })
     });
     const d = await r.json();
@@ -3493,7 +3602,7 @@ function aiChatBuildOpsBlock(ops, dir) {
     wrap.innerHTML = `<div class="ai-ops-block"><div style="display:flex;align-items:center;gap:8px;color:var(--text3);padding:4px 0"><div class="spinner" style="width:12px;height:12px;border-width:2px"></div><span style="font-size:12px">Calculating affected files…</span></div></div>`;
     try {
       const r = await fetch('/api/ollama/agent-preview', {
-        method: 'POST', headers: {'Content-Type':'application/json'},
+        method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
         body: JSON.stringify({ plan: { operations: ops } })
       });
       const d = await r.json();
@@ -3560,24 +3669,32 @@ function aiChatBuildOpsBlock(ops, dir) {
     btn.textContent = 'Running…';
     try {
       const r = await fetch('/api/ollama/agent-run', {
-        method: 'POST', headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ plan: { operations: ops } })
+        method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
+        body: JSON.stringify({ plan: { operations: ops }, clientId: wsId })
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || 'Execution failed');
-      const errs = (d.results || []).filter(r => r.status !== 'ok');
-      const moved = (d.results || []).reduce((s, r) => s + (r.moved || (r.status === 'ok' && r.op === 'move' ? 1 : 0)), 0);
-      wrap.innerHTML = `
-        <div class="ai-ops-block" style="border-color:${errs.length ? 'rgba(217,95,95,.4)' : 'rgba(82,196,26,.3)'}">
-          <div style="font-size:10px;color:var(--text3);margin-bottom:6px;font-weight:700;letter-spacing:.06em">STEP 3 OF 3 — DONE</div>
-          <div style="font-size:13px;font-weight:600;color:${errs.length ? 'var(--red)' : '#52c41a'}">${errs.length ? `⚠ Completed with ${errs.length} error(s)` : `✓ Done — ${moved} file${moved!==1?'s':''} moved`}</div>
-          ${errs.map(e => `<div style="font-size:11px;color:var(--red);margin-top:4px">${esc2(e.op||'')} ${esc2(e.error||'')}</div>`).join('')}
-        </div>`;
-      reload();
+      
+      if (d.jobId) {
+        activeJobs.set(d.jobId, { jobId: d.jobId, status: 'running', percent: 0, phase: 'executing', type: 'agent-run' });
+        showProgressPanel(`AI Agent: ${ops.length} op(s)…`); updateJobsBadge();
+        toast('✦ AI Agent running in background…', 'ok');
+        closeModal();
+      } else {
+        const errs = (d.results || []).filter(r => r.status !== 'ok');
+        const moved = (d.results || []).reduce((s, r) => s + (r.moved || (r.status === 'ok' && r.op === 'move' ? 1 : 0)), 0);
+        wrap.innerHTML = `
+          <div class="ai-ops-block" style="border-color:${errs.length ? 'rgba(217,95,95,.4)' : 'rgba(82,196,26,.3)'}">
+            <div style="font-size:10px;color:var(--text3);margin-bottom:6px;font-weight:700;letter-spacing:.06em">STEP 3 OF 3 — DONE</div>
+            <div style="font-size:13px;font-weight:600;color:${errs.length ? 'var(--red)' : '#52c41a'}">${errs.length ? `⚠ Completed with ${errs.length} error(s)` : `✓ Done — ${moved} file${moved!==1?'s':''} moved`}</div>
+            ${errs.map(e => `<div style="font-size:11px;color:var(--red);margin-top:4px">${esc2(e.op||'')} ${esc2(e.error||'')}</div>`).join('')}
+          </div>`;
+        reload();
+      }
     } catch(e) {
+      toast('⚠ AI execution failed: ' + e.message, 'err');
       btn.disabled = false;
-      btn.textContent = '▶ Retry';
-      aiChatAddMsg('error', 'Execute failed: ' + e.message);
+      btn.textContent = '▶ Execute (' + ops.length + ')';
     }
   }
 
@@ -3602,27 +3719,38 @@ window.aiChatSend = async function() {
   try {
     const dir = curPath || '/';
     const r = await fetch('/api/ollama/agent-plan', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json', 'X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ dir, prompt: text })
     });
     const d = await r.json();
     if (typing) typing.remove();
     if (!r.ok) throw new Error(d.error || 'AI planning failed');
+    
     const ops = d.plan?.operations || [];
-    if (!ops.length) {
+    const response = d.plan?.response || '';
+
+    if (!ops.length && !response) {
       aiChatAddMsg('assistant', "I couldn't plan that operation. Tips:\n• Be specific: \"move all non-image files from here to /home/user/Downloads/noob\"\n• Navigate into the folder first, then ask\n• For cross-folder moves, include the full target path\n• I can: move, create folders, filter by type (images/files/dirs)");
     } else {
       const msgDiv = document.createElement('div');
       msgDiv.className = 'ai-msg assistant';
       const bubble = document.createElement('div');
       bubble.className = 'ai-msg-bubble';
-      bubble.innerHTML = `Here's what I'd do in <span class="ai-dir-badge">${esc(dir)}</span> — review and run when ready:`;
+      
+      const responseHtml = response ? `<div style="margin-bottom:${ops.length?'10px':'0'}">${esc(response)}</div>` : '';
+      const planHtml = ops.length ? `Here's what I'd do in <span class="ai-dir-badge">${esc(dir)}</span> — review and run when ready:` : '';
+      
+      bubble.innerHTML = responseHtml + planHtml;
+      
       const time = document.createElement('div');
       time.className = 'ai-msg-time';
       time.textContent = new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
-      const opsBlock = aiChatBuildOpsBlock(ops, dir);
+      
       msgDiv.appendChild(bubble);
-      if (opsBlock) msgDiv.appendChild(opsBlock);
+      if (ops.length) {
+        const opsBlock = aiChatBuildOpsBlock(ops, dir);
+        if (opsBlock) msgDiv.appendChild(opsBlock);
+      }
       msgDiv.appendChild(time);
       const area = document.getElementById('ai-chat-area');
       if (area) { area.appendChild(msgDiv); area.scrollTop = area.scrollHeight; }
@@ -3817,6 +3945,18 @@ function showSettings() {
   </div>
 </div>
 
+<div class="settings-group">
+  <div class="settings-group-title">Account Security</div>
+  <div style="padding:4px 0">
+    <div style="font-size:11px;color:var(--text3);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em;font-weight:600">Update Credentials</div>
+    <input class="settings-text-input" id="s-new-user" placeholder="New Username" style="margin-bottom:8px">
+    <input class="settings-text-input" type="password" id="s-new-pass" placeholder="New Password" style="margin-bottom:8px">
+    <input class="settings-text-input" type="password" id="s-new-pass-confirm" placeholder="Confirm New Password">
+    <div id="s-account-err" style="color:var(--red);font-size:12px;margin-top:8px;display:none"></div>
+    <button class="tbar-btn primary" style="width:100%;margin-top:12px;justify-content:center" onclick="updateAccount(this)">Update Account</button>
+  </div>
+</div>
+
 <div class="modal-row" style="margin-top:4px">
   <button class="mbtn" onclick="closeModal()">Cancel</button>
   <button class="mbtn" onclick="resetSettings()" style="color:var(--red)">Reset</button>
@@ -3871,6 +4011,14 @@ function showSettings() {
 
 // Expose settings to rest of app
 function getSetting(key) { return _settings[key] ?? SETTINGS_DEFAULTS[key]; }
+
+function toggleHidden() {
+  _settings.showHidden = !_settings.showHidden;
+  saveSettings(_settings);
+  filtered = applyFilter(entries);
+  renderFiles();
+  toast(_settings.showHidden ? '✓ Hidden files shown' : 'Hidden files hidden');
+}
 
 function showAIModels() {
   const m = mkModal();
@@ -3929,8 +4077,8 @@ async function aiSemanticSearch(query) {
     </div>`;
   try {
     const r = await fetch('/api/ollama/search', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ query, dir: curPath })
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
+      body: JSON.stringify({ query, dir: curPath, showHidden: getSetting('showHidden') })
     });
     const d = await r.json();
     if (!r.ok) throw new Error(d.error || 'Search failed');
@@ -3969,6 +4117,8 @@ async function uploadFiles(files) {
   // Each file is a separate request; the server still tracks them via jobId.
   requestWakeLock();
   for (let i = 0; i < total; i++) {
+    const file = files[i];
+    const fd = new FormData();
     fd.append('files', file);
     fd.append('path', curPath);
     fd.append('clientId', wsId);
@@ -3981,6 +4131,7 @@ async function uploadFiles(files) {
     await new Promise(resolve => {
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/upload');
+      xhr.setRequestHeader('X-Nova-CSRF', getCsrf());
 
       xhr.upload.onprogress = ev => {
         if (!ev.lengthComputable) return;
@@ -4055,7 +4206,7 @@ async function cancelActiveJob() {
   if (!_activeCancelJobId) return;
   try {
     await fetch('/api/transfer/cancel', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ jobId: _activeCancelJobId })
     });
     const btn = document.getElementById('pp-cancel-btn');
@@ -4073,6 +4224,7 @@ function updateProgressPanel(job) {
                   : job.type === 'upload' ? 'Uploading…'
                   : job.type === 'zip'    ? 'Zipping…'
                   : job.type === 'unzip'  ? 'Extracting…'
+                  : job.type === 'agent-run' ? 'AI Agent…'
                   : 'Copying…';
     document.getElementById('pp-label').textContent = opLabel;
     document.getElementById('pp-spin').style.display = '';
@@ -4230,7 +4382,9 @@ document.addEventListener('keydown', ev => {
     if (ev.key==='x') cutSel();
     if (ev.key==='v') doPaste();
     if (ev.key==='a') { ev.preventDefault(); filtered.forEach(e=>selected.add(e.path)); renderFiles(); selUI(); }
+    if (ev.key==='h') { ev.preventDefault(); toggleHidden(); }
   }
+  if (ev.key==='.') { toggleHidden(); }
   if (ev.key==='Delete'&&selected.size) delSel();
   if (ev.key==='F5') { ev.preventDefault(); reload(); }
   if (ev.key==='Escape') { selected.clear(); renderFiles(); selUI(); document.querySelectorAll('.ctxmenu').forEach(e=>e.remove()); }
@@ -4251,7 +4405,7 @@ async function cancelJobFromPanel(jobId, btn) {
   try {
     btn.textContent = 'Cancelling…'; btn.disabled = true;
     const r = await fetch('/api/transfer/cancel', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ jobId })
     });
     if (!r.ok) { const d = await r.json(); toast('⚠ ' + (d.error || 'Cancel failed'), 'err'); btn.textContent = 'Cancel'; btn.disabled = false; }
@@ -4263,7 +4417,7 @@ async function cancelZipJob(jobId, btn) {
   try {
     btn.textContent = 'Cancelling…'; btn.disabled = true;
     const r = await fetch('/api/zip/cancel', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ jobId })
     });
     if (!r.ok) { const d = await r.json(); toast('⚠ ' + (d.error || 'Cancel failed'), 'err'); btn.textContent = 'Cancel'; btn.disabled = false; }
@@ -4275,7 +4429,7 @@ async function resumeZip(jobId) {
   closeModal();
   try {
     const r = await fetch('/api/zip/resume', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ jobId, clientId: wsId })
     });
     const d = await r.json();
@@ -4291,7 +4445,7 @@ async function resumeUnzip(jobId) {
   closeModal();
   try {
     const r = await fetch('/api/unzip/resume', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
+      method: 'POST', headers: {'Content-Type':'application/json','X-Nova-CSRF':getCsrf()},
       body: JSON.stringify({ jobId, clientId: wsId })
     });
     const d = await r.json();
@@ -4308,7 +4462,7 @@ async function resumeTransfer(jobId) {
   try {
     const r = await fetch('/api/transfer/resume', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-Nova-CSRF': getCsrf() },
       body: JSON.stringify({ jobId, clientId: wsId })
     });
     const d = await r.json();
@@ -4338,8 +4492,9 @@ async function restoreRunningJobs() {
     }
     const latest = running.sort((a,b) => new Date(b.startedAt)-new Date(a.startedAt))[0];
     updateProgressPanel(latest);
-    // Re-attach cancel button if the job supports it
-    if (latest.type === 'transfer') showCancelBtn(latest.jobId);
+    // Re-attach cancel button if the job supports it (transfer, zip, unzip, agent-run)
+    const cancelables = ['transfer','zip','unzip','agent-run'];
+    if (cancelables.includes(latest.type)) showCancelBtn(latest.jobId);
     updateJobsBadge();
     toast(`⟳ Reconnected to ${running.length} running job(s)`, 'ok');
   } catch {}
@@ -4380,7 +4535,7 @@ setInterval(async () => {
           finishedJobs.add(job.jobId);
           hideCancelBtn();
           if (job.status === 'done') {
-            setTimeout(() => closeProgress(), 2500);
+            setTimeout(() => { if (![...activeJobs.values()].some(j => j.status === 'running')) closeProgress(); }, 2500);
             const label = job.type === 'delete' || job.type === 'delete-permanent' ? '🗑 Delete complete'
                         : job.type === 'trash-empty' ? '🗑 Trash emptied'
                         : job.type === 'upload'  ? '✓ Upload saved'
