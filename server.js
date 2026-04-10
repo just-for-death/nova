@@ -408,60 +408,50 @@ app.use(express.static(path.join(__dirname, 'public')));
 // ─────────────────────────────────────────────────────────────────
 async function resolvePath(p, followSymlinks = false) {
   const normalized = path.normalize('/' + (p || '/')).replace(/\/\/+/g, '/');
-  const result = ROOT + normalized;
-  
+  let currentAbs = path.join(ROOT, normalized);
+
   // Path traversal guard: resolved path must still start with ROOT
-  if (ROOT && !result.startsWith(ROOT)) {
+  if (ROOT && !currentAbs.startsWith(ROOT)) {
     throw new Error(`Path traversal rejected: ${p}`);
   }
 
-  // Symlink escape protection (async check)
+  // Symlink escape protection (async manual walk for Docker safety)
   if (followSymlinks && ROOT) {
-    let curr = result;
-    // Check components from deepest to root to find first existing one
-    while (curr && curr.startsWith(ROOT)) {
-      try {
-        let real = await fs.promises.realpath(curr);
-        
-        // Host-root reconciliation for absolute symlinks in Docker
-        if (!real.startsWith(ROOT) && real.startsWith('/')) {
-          const hostReconciled = path.join(ROOT, real);
-          try {
-            if (fs.existsSync(hostReconciled)) {
-              real = await fs.promises.realpath(hostReconciled);
+    let curr = '/';
+    const parts = currentAbs.split('/').filter(Boolean);
+    for (let i = 0; i < parts.length; i++) {
+        curr = path.join(curr, parts[i]);
+        let maxLinks = 40; // Prevention against infinite cyclic symlink loops
+        while (maxLinks-- > 0) {
+            try {
+                const st = await fs.promises.lstat(curr);
+                if (st.isSymbolicLink()) {
+                    const target = await fs.promises.readlink(curr);
+                    // Host-root reconciliation for absolute symlinks inside unprivileged Docker
+                    if (path.isAbsolute(target)) curr = path.join(ROOT, target);
+                    else curr = path.resolve(path.dirname(curr), target);
+                    
+                    if (!curr.startsWith(ROOT)) throw new Error(`Symlink escape rejected: ${curr}`);
+                } else break;
+            } catch (e) {
+                // If a component is genuinely broken/missing, bubble the security breach but otherwise ignore standard ENOENT failures (they'll fail accurately at Native 'fs' levels later)
+                if (e.message && e.message.includes('Symlink escape')) throw e;
+                const remaining = parts.slice(i+1).join('/');
+                curr = remaining ? path.join(curr, remaining) : curr;
+                i = parts.length; // Abort structural iteration, it's natively unreachable gracefully
+                break;
             }
-          } catch (e) { /* ignore existsSync/realpath errors on hostReconciled */ }
         }
-
-        if (!real.startsWith(ROOT)) {
-          throw new Error(`Symlink escape rejected: ${p} -> ${real}`);
-        }
-        break; 
-      } catch (e) {
-        if (e.code !== 'ENOENT') throw e;
-        const parent = path.dirname(curr);
-        if (parent === curr) break;
-        curr = parent;
-      }
+    }
+    
+    currentAbs = curr;
+    if (!currentAbs.startsWith(ROOT)) {
+        throw new Error(`Symlink escape rejected: ${p} -> ${currentAbs}`);
     }
   }
 
-  // Final "Deep Seal" Sanity Check: resolve the base of the ROOT realpath
-  // and compare it to the resolved realpath target.
-  if (ROOT) {
-    try {
-      const rootReal = await fs.promises.realpath(ROOT);
-      const targetReal = await fs.promises.realpath(result);
-      if (!targetReal.startsWith(rootReal)) {
-        throw new Error(`Structural traversal rejected: ${p} -> ${targetReal}`);
-      }
-    } catch (e) {
-      if (e.code !== 'ENOENT') throw e;
-    }
-  }
-
-  return result.length > ROOT.length + 1 && result.endsWith('/')
-    ? result.replace(/\/$/, '') : result;
+  return currentAbs.length > ROOT.length + 1 && currentAbs.endsWith('/')
+    ? currentAbs.replace(/\/$/, '') : currentAbs;
 }
 const isSubpath = (parent, child) => {
   const relative = path.relative(parent, child);
