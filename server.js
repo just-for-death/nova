@@ -933,7 +933,8 @@ app.get('/api/mounts', async (req, res) => {
     const args = ['-B1', ...raw.map(m => m.mountpoint)];
     
     execFile('df', args, (dfErr, dfOut) => {
-      if (dfErr || !dfOut) return res.json({ mounts: [] });
+      // df throws exit code 1 if even a single mount restricts stat permissions, but valid outputs are still processed cleanly to dfOut
+      if (!dfOut || dfOut.trim() === '') return res.json({ mounts: [] });
 
       const byDevice = new Map();
       const lines = dfOut.trim().split('\n').slice(1); // skip header
