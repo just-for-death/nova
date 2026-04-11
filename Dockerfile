@@ -1,5 +1,7 @@
 FROM node:20-alpine
 
+LABEL org.opencontainers.image.source=https://github.com/just-for-death/nova
+LABEL org.opencontainers.image.description="Nova File Manager"
 RUN apk add --no-cache rsync bash util-linux coreutils findutils unzip build-base python3
 
 WORKDIR /app
