@@ -904,8 +904,9 @@ app.get('/api/mounts', async (req, res) => {
   const FILE_MOUNT  = /\/[^/]+\.[^/]+$/;
   // Container hash-style names (12 or 64 hex chars as a path component)
   const HASH_MOUNT  = /\/[0-9a-f]{12,64}(\/|$)/;
-  const SKIP_MPS    = new Set(['/','/boot/efi','/boot/esp']);
-  const SKIP_PFXS   = ['/proc','/sys','/dev','/run/user','/run/credentials','/snap','/var/lib/docker'];
+  const SKIP_MPS    = new Set(['/','/boot/efi','/boot/esp','/hostroot','/hostroot/boot','/hostroot/boot/efi']);
+  const SKIP_PFXS   = ['/proc','/sys','/dev','/run/user','/run/credentials','/snap','/var/lib/docker',
+                       '/hostroot/proc','/hostroot/sys','/hostroot/dev','/hostroot/run/user','/hostroot/snap'];
 
   fs.readFile('/proc/mounts', 'utf8', (err, data) => {
     if (err) return res.json({ mounts: [] });
