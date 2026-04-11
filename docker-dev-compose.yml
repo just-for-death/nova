@@ -12,6 +12,7 @@ services:
       - ROOT_PATH=/hostroot
       - PORT=9898
       - NODE_ENV=production
+      - CSRF_SECRET=deP9BBcs7UUpaJdmsISzheLOr2Y8QjLLV4wLKphCY
       - LOG_LEVEL=info
       - LOG_FORMAT=pretty
       - COPY_WORKERS=4

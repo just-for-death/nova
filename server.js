@@ -219,7 +219,7 @@ const run = (sql, params = []) => new Promise((resolve, reject) => {
       const ADMIN_PASS = process.env.ADMIN_PASS || uuidv4().slice(0, 12);
       
       log('warn', '⚠️  INITIALIZING SECURE CREDENTIALS — PLEASE CHECK LOGS OR SET IN .env');
-      log('info', `### NOVO CREDENTIALS: user=${ADMIN_USER} pass=${ADMIN_PASS} ###`);
+      log('info', `### NOVA CREDENTIALS: user=${ADMIN_USER} pass=${ADMIN_PASS} ###`);
       
       const salt = crypto.randomBytes(16).toString('hex');
       const hash = crypto.scryptSync(ADMIN_PASS, salt, 64).toString('hex');
