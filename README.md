@@ -45,20 +45,18 @@
 
 | Category | What it does |
 |----------|-------------|
-| **Browse** | Grid & list views, breadcrumb nav, search, hidden-file toggle |
-| **Transfer** | Parallel copy/move with live progress, resume & cancel |
-| **Conflict resolution** | Per-file: overwrite / skip / keep-both |
-| **Trash** | Safe delete with restore; permanent delete option |
-| **Upload** | Drag-and-drop; survives browser close (background job) |
-| **Download** | Single file or multi-select (auto-zipped on server) |
-| **Zip / Unzip** | Create and extract archives as background jobs |
-| **Editor** | Text editor for 50+ file types with dirty-state tracking |
-| **AI (Ollama)** | Summarise, rename, describe images, semantic search, AI task agent |
-| **Settings** | Show hidden files, date format, size unit, editor prefs, Dozzle URL |
-| **PWA** | Installable, offline shell, home-screen shortcuts |
-| **Notifications** | Gotify push alerts for completed jobs |
-| **Logs** | Structured JSON logs (Dozzle-friendly); text mode also available |
-| **Monitor** | Sidecar container watches Nova and sends alerts if it goes down |
+| **Browse** | Intuitive Grid, Gallery, & List views; breadcrumb nav, semantic search, hidden-file toggle |
+| **PWA & Theming** | Fluid, installable Progressive Web App with scalable, context-aware SVGs and a dynamic UI theming engine |
+| **Transfer** | Parallel copy/move with live progress tracking, resume, pause & cancel |
+| **Conflict resolution** | Per-file collision handling: overwrite / skip / keep-both |
+| **Trash** | Safe soft-delete with restore mechanics and permanent delete option |
+| **Uploads** | Drag-and-drop resilience; continues actively in the background |
+| **Archives** | Create `.zip` and extract multi-format archives directly as background jobs |
+| **Editor** | Monospace text editor for 50+ file types with dirty-state tracking |
+| **AI (Ollama)** | Summarize content, rename sequences, query image metadata, and an autonomous AI task agent |
+| **Settings** | UI to effortlessly manage themes, icon sizing, credentials, Dozzle URLs, and UI scaling |
+| **Notifications** | Native Gotify push alerts upon successful completion or failure of background jobs |
+| **Logs & Monitor** | Structured JSON logs + an independent sidecar container `nova-monitor` to poll for system interruptions |
 
 ---
 
@@ -82,9 +80,28 @@ open http://localhost:9898
 
 ---
 
+## 🔒 Security & Credentials
+
+Nova secures all persistent sessions inside its native SQLite database, fortifying against CSRF attacks with strict Double-Submit-Token enforcement on all critical API routes.
+
+Upon **first launch**, the backend reads these variables in `docker-compose.yml` to generate your initial secure administrator hash:
+```yaml
+      - ADMIN_USER=admin
+      - ADMIN_PASS=MySecurePassword123!
+```
+
+> **IMPORTANT:** 
+> These environment variables are *only* read when the database is empty. Once the container successfully secures the initial account, updating these variables in `docker-compose.yml` has no effect. 
+> To update your password later, securely alter it via the **Nova UI Settings Panel**.
+
+Nova binds the **entire host filesystem** container path `/hostroot` as `privileged`.
+> **Never expose it to the open internet unprotected.** It is intended strictly for local home-labbing or heavily-vetted VPN/Proxy environments!
+
+---
+
 ## ⚙️ Configuration
 
-All config lives in `.env` (copy from `.env.example`):
+All configuration lives in `.env`:
 
 | Variable | Default | Description |
 |---|---|---|
@@ -93,27 +110,23 @@ All config lives in `.env` (copy from `.env.example`):
 | `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
 | `LOG_FORMAT` | `json` | `json` (Dozzle) or `text` (human-readable) |
 | `COPY_WORKERS` | `4` | Parallel file copy threads |
-| `GOTIFY_URL` | _(empty)_ | Gotify server URL |
-| `GOTIFY_TOKEN` | _(empty)_ | Gotify application token |
-| `OLLAMA_URL` | `http://host-gateway:11434` | Ollama base URL |
-| `OLLAMA_TEXT_MODEL` | `llama3.2:1b` | Model for summarise / rename / tag |
-| `OLLAMA_VISION_MODEL` | `moondream:latest` | Model for image description |
-| `OLLAMA_EMBED_MODEL` | `nomic-embed-text:latest` | Model for semantic search |
-| `OLLAMA_AGENT_MODEL` | _(same as text)_ | Model for AI task agent |
+| `AUTH_SECRET` | `nova-persistent` | A secure persistent session key mapping |
+| `GOTIFY_...` | _(empty)_ | Gotify tokens for mobile push notifications |
+| `OLLAMA_URL` | `http://host-gateway:11434` | Ollama semantic reasoning path |
 
 ---
 
 ## 🤖 AI Features
 
-Nova connects to a local [Ollama](https://ollama.com) instance. **All AI runs locally — nothing is sent to the cloud.**
+Nova natively queries a local [Ollama](https://ollama.com) language model pipeline. **All AI actions stay within your host.**
 
 ```bash
-ollama pull llama3.2:1b          # text ops (summarise, rename, tag)
-ollama pull moondream:latest     # image description
-ollama pull nomic-embed-text     # semantic search
+ollama pull llama3.2:1b          # Text semantic pipelines (renaming, tagging)
+ollama pull moondream:latest     # Visual perception framework (images)
+ollama pull nomic-embed-text     # Semantic knowledge search
 ```
 
-Right-click any file or folder to access AI actions. The **AI Task** agent lets you describe what you want done in plain English — it proposes a plan you review before running.
+Right-click any folder or document to deploy AI models. The **AI Task Agent** actively builds logic roadmaps inside your terminal buffer, giving you full sandbox oversight before executing any filesystem commands.
 
 ---
 
@@ -123,38 +136,19 @@ Right-click any file or folder to access AI actions. The **AI Task** agent lets 
 |-----|--------|
 | `Ctrl+C` | Copy selected |
 | `Ctrl+X` | Cut selected |
-| `Ctrl+V` | Paste |
-| `Ctrl+A` | Select all |
+| `Ctrl+V` | Paste buffer |
+| `Ctrl+A` | Select aggregate |
 | `Delete` | Move to trash |
-| `F5` | Refresh |
-| `Backspace` | Go back |
-| `Escape` | Deselect / close modal |
-| `Ctrl+S` | Save in editor |
+| `F5` | Hot reload UI state |
+| `Backspace` | Navigate relative backing |
+| `Escape` | Dismiss modal |
+| `Ctrl+S` | Save Editor payload |
 
 ---
 
-## 📋 Dozzle Integration
+## 📦 Architecture
 
-Nova emits **structured JSON logs** by default, which [Dozzle](https://dozzle.dev) parses automatically.
-
-1. Go to **Settings → Integrations** and enter your Dozzle URL
-2. A **📋 Dozzle Logs ↗** button appears in the Jobs panel
-
-To switch to human-readable logs: set `LOG_FORMAT=text` in `.env`.
-
----
-
-## 🔒 Security
-
-Nova mounts your **entire host filesystem** with `privileged: true`.
-
-> **Do not expose it to the internet without authentication.** Designed for trusted home networks or VPN-only access. Consider fronting with an auth proxy: [Authelia](https://www.authelia.com), [Caddy basicauth](https://caddyserver.com/docs/caddyfile/directives/basicauth), or [Traefik ForwardAuth](https://doc.traefik.io/traefik/middlewares/http/forwardauth/).
-
----
-
-## 🏗 Architecture
-
-```
+```text
 ┌──────────────────────────┐     ┌──────────────────┐
 │   nova-filemanager       │◄────│   nova-monitor   │
 │   Node.js + Express      │     │   health poller  │
@@ -164,15 +158,8 @@ Nova mounts your **entire host filesystem** with `privileged: true`.
              │ bind mount
          /:/hostroot (read-write)
 ```
-
----
-
-## 📦 Stack
-
-- **Backend** — Node.js 20, Express, `ws`, `archiver`, `express-fileupload`
-- **Frontend** — Vanilla JS + CSS (zero build step, zero dependencies)
-- **AI** — Ollama (local, optional)
-- **Notifications** — Gotify (optional)
+- **Backend:** Node.js 20, Express, `ws`, `archiver`
+- **Frontend:** HTML5, CSS3 Variables, Vanilla JS (No build pipeline necessary)
 
 ---
 
