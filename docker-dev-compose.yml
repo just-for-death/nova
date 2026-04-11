@@ -1,6 +1,6 @@
 services:
   nova-filemanager:
-    image: justxforxdocker/nova-filemanager:latest
+    image: ghcr.io/just-for-death/nova:latest
     container_name: nova-filemanager
     restart: unless-stopped
     privileged: true
@@ -13,6 +13,9 @@ services:
       - PORT=9898
       - NODE_ENV=production
       - CSRF_SECRET=deP9BBcs7UUpaJdmsISzheLOr2Y8QjLLV4wLKphCY
+      - AUTH_SECRET=nova-persistent-secret-change-me-for-security
+      - ADMIN_USER=admin
+      - ADMIN_PASS=MySecurePassword123!
       - LOG_LEVEL=info
       - LOG_FORMAT=pretty
       - COPY_WORKERS=4
