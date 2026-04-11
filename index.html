@@ -438,11 +438,11 @@ body {
   user-select: none;
 }
 .fitem-grid:hover { background: var(--surface2); border-color: var(--border); }
-.fitem-grid.sel { background: var(--accentbg); border-color: rgba(196,102,58,0.3); }
+.fitem-grid.sel { background: var(--accentbg); border-color: var(--accent); opacity: 0.8; }
 .fitem-grid.cut { opacity: 0.4; }
 .grid-icon {
   font-size: 42px; margin-bottom: 8px; line-height: 1;
-  width: 42px; height: 42px;
+  width: auto; height: auto; min-width: 38px;
   display: flex; align-items: center; justify-content: center;
 }
 .grid-icon svg { width: 38px; height: 38px; }
@@ -474,7 +474,7 @@ body {
   transition: var(--tr); user-select: none;
 }
 .fitem-list:hover { background: var(--surface2); border-color: var(--border); }
-.fitem-list.sel { background: var(--accentbg); border-color: rgba(196,102,58,0.3); }
+.fitem-list.sel { background: var(--accentbg); border-color: var(--accent); }
 .fitem-list.cut { opacity: 0.4; }
 .list-icon {
   font-size: 18px;
@@ -580,6 +580,33 @@ body {
 .mbtn.ok:hover { background: var(--accent2); }
 .mbtn.bad { background: var(--red); color: #fff; border-color: transparent; }
 .mbtn.bad:hover { background: #e86a6a; }
+
+/* ── SETTINGS VIEW (PWA) ──────────────────────────── */
+.settings-view {
+  position: fixed; inset: 0;
+  background: var(--bg);
+  z-index: 2000;
+  overflow-y: auto;
+  padding-bottom: env(safe-area-inset-bottom, 20px);
+  animation: settings-fade 0.2s ease;
+}
+@keyframes settings-fade { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+.settings-view-inner {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: env(safe-area-inset-top, 40px) 24px 100px;
+  padding-left: calc(24px + env(safe-area-inset-left, 0px));
+  padding-right: calc(24px + env(safe-area-inset-right, 0px));
+}
+.settings-header {
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  padding: 20px 0;
+  border-bottom: 1px solid var(--border);
+  z-index: 10;
+  margin-bottom: 24px;
+}
 
 /* ── PROGRESS PANEL ───────────────────────────────── */
 .progress-panel {
@@ -1706,10 +1733,7 @@ async function refresh() {
     if (!data) return; // handled by api wrapper (401 redirect)
     entries = data.entries || [];
     render();
-    if (curPath === '/') {
-      const mdata = await api(`/api/mounts`);
-      if (mdata) renderMounts(mdata);
-    }
+    if (curPath === '/') loadMounts();
   } catch (e) {
     // Already toasted by api()
   } finally {
@@ -1820,20 +1844,20 @@ function renderBC(p) {
 // RENDER FILES
 // ═══════════════════════════════════════════
 const FILE_SVG = {
-  dir:      `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h4l2 2H17a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 17 17H3.5A1.5 1.5 0 0 1 2 15.5z" stroke="var(--yellow)" stroke-width="1.4" fill="rgba(201,148,74,.12)" stroke-linejoin="round"/></svg>`,
+  dir:      `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h4l2 2H17a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 17 17H3.5A1.5 1.5 0 0 1 2 15.5z" stroke="var(--accent)" stroke-width="1.4" fill="var(--accentbg)" stroke-linejoin="round"/></svg>`,
   img:      `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><rect x="2.5" y="4.5" width="15" height="11" rx="2" stroke="var(--blue)" stroke-width="1.4" fill="rgba(90,143,204,.1)"/><circle cx="7" cy="8" r="1.5" stroke="var(--blue)" stroke-width="1.2"/><path d="M2.5 13.5l4-3.5 3 2.5 3-3 4.5 4" stroke="var(--blue)" stroke-width="1.3" stroke-linejoin="round"/></svg>`,
   video:    `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><rect x="2" y="5" width="12" height="10" rx="2" stroke="var(--red)" stroke-width="1.4" fill="rgba(217,95,95,.1)"/><path d="M14 8.5l4-2v7l-4-2z" stroke="var(--red)" stroke-width="1.4" stroke-linejoin="round"/></svg>`,
-  audio:    `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7.5" stroke="var(--accent2)" stroke-width="1.4" fill="rgba(196,102,58,.08)"/><circle cx="10" cy="10" r="2.5" stroke="var(--accent2)" stroke-width="1.4"/><path d="M10 2.5v3M10 14.5v3M2.5 10h3M14.5 10h3" stroke="var(--accent2)" stroke-width="1.3" stroke-linecap="round"/></svg>`,
+  audio:    `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><circle cx="10" cy="10" r="7.5" stroke="var(--accent)" stroke-width="1.4" fill="var(--accentbg)"/><circle cx="10" cy="10" r="2.5" stroke="var(--accent)" stroke-width="1.4"/><path d="M10 2.5v3M10 14.5v3M2.5 10h3M14.5 10h3" stroke="var(--accent)" stroke-width="1.3" stroke-linecap="round"/></svg>`,
   pdf:      `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M5 2h8l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="var(--red)" stroke-width="1.4" fill="rgba(217,95,95,.08)"/><path d="M13 2v4h4" stroke="var(--red)" stroke-width="1.3" stroke-linecap="round"/><path d="M7 10h6M7 13h4" stroke="var(--red)" stroke-width="1.3" stroke-linecap="round"/></svg>`,
-  zip:      `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M5 2h8l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="var(--yellow)" stroke-width="1.4" fill="rgba(201,148,74,.1)"/><path d="M9 2v12M9 2l2 2-2 2 2 2-2 2 2 2-2 2" stroke="var(--yellow)" stroke-width="1.2" stroke-linecap="round"/></svg>`,
-  code:     `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M5 2h8l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="var(--accent3)" stroke-width="1.4" fill="rgba(240,144,96,.08)"/><path d="M7.5 9.5 5.5 11 7.5 12.5M12.5 9.5 14.5 11l-2 1.5" stroke="var(--accent3)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 8.5l-2 5" stroke="var(--accent3)" stroke-width="1.3" stroke-linecap="round"/></svg>`,
+  zip:      `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M5 2h8l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="var(--accent)" stroke-width="1.4" fill="var(--accentbg)"/><path d="M9 2v12M9 2l2 2-2 2 2 2-2 2 2 2-2 2" stroke="var(--accent)" stroke-width="1.2" stroke-linecap="round"/></svg>`,
+  code:     `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M5 2h8l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="var(--accent)" stroke-width="1.4" fill="var(--accentbg)"/><path d="M7.5 9.5 5.5 11 7.5 12.5M12.5 9.5 14.5 11l-2 1.5" stroke="var(--accent)" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M11 8.5l-2 5" stroke="var(--accent)" stroke-width="1.3" stroke-linecap="round"/></svg>`,
   text:     `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M5 2h8l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="var(--text2)" stroke-width="1.4" fill="rgba(255,240,220,.04)"/><path d="M7 10h6M7 13h4M7 7h4" stroke="var(--text2)" stroke-width="1.3" stroke-linecap="round"/></svg>`,
   config:   `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M5 2h8l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="var(--blue)" stroke-width="1.4" fill="rgba(90,143,204,.08)"/><path d="M8.5 8a1.5 1.5 0 1 0 3 0 1.5 1.5 0 0 0-3 0zM8.5 13a1.5 1.5 0 1 0 3 0 1.5 1.5 0 0 0-3 0z" stroke="var(--blue)" stroke-width="1.2"/><path d="M13 8h-1M8 8H7M13 13h-1M8 13H7" stroke="var(--blue)" stroke-width="1.2" stroke-linecap="round"/></svg>`,
   web:      `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M5 2h8l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="var(--green)" stroke-width="1.4" fill="rgba(90,170,120,.08)"/><path d="M6.5 10H14M7 7.5l1.5 2.5-1.5 2.5M13 7.5l-1.5 2.5 1.5 2.5" stroke="var(--green)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
   dot:      `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M5 2h8l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="var(--text3)" stroke-width="1.4" fill="none"/><circle cx="10" cy="11" r="3" stroke="var(--text3)" stroke-width="1.3"/><path d="M8.8 8.2V7a1.2 1.2 0 0 1 2.4 0v1.2" stroke="var(--text3)" stroke-width="1.2" stroke-linecap="round"/></svg>`,
   file:     `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M5 2h8l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="var(--text3)" stroke-width="1.4" fill="none"/><path d="M13 2v4h4" stroke="var(--text3)" stroke-width="1.3" stroke-linecap="round"/></svg>`,
-  symDir:   `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h4l2 2H17a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 17 17H3.5A1.5 1.5 0 0 1 2 15.5z" stroke="var(--accent2)" stroke-width="1.4" fill="rgba(196,102,58,.08)" stroke-linejoin="round" stroke-dasharray="2.5 1.5"/></svg>`,
-  symFile:  `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M5 2h8l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="var(--accent2)" stroke-width="1.4" fill="none" stroke-dasharray="2.5 1.5"/></svg>`,
+  symDir:   `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h4l2 2H17a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 17 17H3.5A1.5 1.5 0 0 1 2 15.5z" stroke="var(--accent)" stroke-width="1.4" fill="var(--accentbg)" stroke-linejoin="round" stroke-dasharray="2.5 1.5"/></svg>`,
+  symFile:  `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M5 2h8l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="var(--accent)" stroke-width="1.4" fill="none" stroke-dasharray="2.5 1.5"/></svg>`,
   symBroken:`<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M10 3v5M10 3l-2 2M10 3l2 2" stroke="var(--red)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M7 10h6M7 14h6M5 17h10" stroke="var(--red)" stroke-width="1.3" stroke-linecap="round" opacity=".5"/><circle cx="10" cy="12" r="5.5" stroke="var(--red)" stroke-width="1.4" fill="rgba(217,95,95,.08)"/></svg>`,
 };
 
@@ -3839,6 +3863,9 @@ const SETTINGS_DEFAULTS = {
   gotifyEnabled:    false,
   gotifyUrl:        '',
   gotifyToken:      '',
+  themeColor:       'orange',
+  themeIconSize:    'normal',
+  themeFontSize:    'normal'
 };
 
 function loadSettings() {
@@ -3851,16 +3878,98 @@ function saveSettings(settings) {
   try { localStorage.setItem('nova_settings', JSON.stringify(settings)); } catch {}
 }
 
+function applyThemeOverrides(s) {
+  let css = '';
+  const colors = {
+    orange: { acc: '#c4663a', acc2: '#e07848', bg1: 'rgba(196,102,58,0.12)' },
+    blue:   { acc: '#3b82f6', acc2: '#60a5fa', bg1: 'rgba(59,130,246,0.12)' },
+    green:  { acc: '#10b981', acc2: '#34d399', bg1: 'rgba(16,185,129,0.12)' },
+    purple: { acc: '#8b5cf6', acc2: '#a78bfa', bg1: 'rgba(139,92,246,0.12)' },
+    red:    { acc: '#ef4444', acc2: '#f87171', bg1: 'rgba(239,68,68,0.12)' }
+  };
+  const c = colors[s.themeColor] || colors.orange;
+  css += `:root { --accent: ${c.acc}; --accent2: ${c.acc2}; --accentbg: ${c.bg1}; --accentbg2: ${c.bg1.replace('0.12', '0.20')}; }\n`;
+
+  if (s.themeIconSize === 'large') {
+    css += `.list-icon svg { width: 26px !important; height: 26px !important; } `;
+    css += `.grid-icon svg, .grid-thumb img { width: 58px !important; height: 58px !important; } `;
+    css += `.file-grid { grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)) !important; } `;
+  } else if (s.themeIconSize === 'xlarge') {
+    css += `.list-icon svg { width: 34px !important; height: 34px !important; } `;
+    css += `.grid-icon svg, .grid-thumb img { width: 86px !important; height: 86px !important; } `;
+    css += `.file-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)) !important; } `;
+  }
+
+  if (s.themeFontSize === 'large') {
+    css += `body, .fitem-list, .grid-name, .tbar-btn, .sb-item { font-size: 16.5px !important; } `;
+    css += `.list-size, .list-date, .grid-size { font-size: 13px !important; } `;
+    css += `.breadcrumb { font-size: 17px !important; } `;
+  }
+
+  let el = document.getElementById('nova-theme');
+  if (!el) { el = document.createElement('style'); el.id = 'nova-theme'; document.head.appendChild(el); }
+  el.textContent = css;
+
+  // Update PWA/Meta theme color
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', c.acc);
+}
+
 let _settings = loadSettings();
+applyThemeOverrides(_settings);
 
 function showSettings() {
   const s = { ..._settings };
-  const m = mkModal();
-  m.style.maxWidth = '480px';
+  let m = document.getElementById('nova-settings-view');
+  if (!m) {
+    m = document.createElement('div');
+    m.id = 'nova-settings-view';
+    m.className = 'settings-view';
+    document.body.appendChild(m);
+  }
 
   function render() {
     m.innerHTML = `
-<h2 style="margin-bottom:18px">⚙ Settings</h2>
+<div class="settings-view-inner">
+  <div class="settings-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:24px">
+    <h2 style="margin:0;font-family:var(--font-serif);letter-spacing:-0.3px;font-size:22px">⚙ Settings</h2>
+    <div style="display:flex;gap:8px">
+      <button class="mbtn" onclick="document.body.removeChild(document.getElementById('nova-settings-view'))">Close</button>
+      <button class="mbtn ok" onclick="applySettings()">Save</button>
+    </div>
+  </div>
+
+<div class="settings-group">
+  <div class="settings-group-title">Appearance</div>
+
+  <div class="settings-row">
+    <div class="settings-left"><div class="settings-label">Theme Accent</div></div>
+    <select class="settings-select" id="s-theme-color">
+      <option value="orange" ${s.themeColor==='orange'?'selected':''}>Orange (Default)</option>
+      <option value="blue"   ${s.themeColor==='blue'?'selected':''}>Blue</option>
+      <option value="green"  ${s.themeColor==='green'?'selected':''}>Green</option>
+      <option value="purple" ${s.themeColor==='purple'?'selected':''}>Purple</option>
+      <option value="red"    ${s.themeColor==='red'?'selected':''}>Red</option>
+    </select>
+  </div>
+
+  <div class="settings-row">
+    <div class="settings-left"><div class="settings-label">Icon Size</div></div>
+    <select class="settings-select" id="s-theme-icons">
+      <option value="normal" ${s.themeIconSize==='normal'?'selected':''}>Normal</option>
+      <option value="large"  ${s.themeIconSize==='large'?'selected':''}>Large</option>
+      <option value="xlarge" ${s.themeIconSize==='xlarge'?'selected':''}>Extra Large</option>
+    </select>
+  </div>
+
+  <div class="settings-row">
+    <div class="settings-left"><div class="settings-label">Font Scale</div></div>
+    <select class="settings-select" id="s-theme-fonts">
+      <option value="normal" ${s.themeFontSize==='normal'?'selected':''}>Normal</option>
+      <option value="large"  ${s.themeFontSize==='large'?'selected':''}>Large</option>
+    </select>
+  </div>
+</div>
 
 <div class="settings-group">
   <div class="settings-group-title">Files &amp; Navigation</div>
@@ -3957,12 +4066,11 @@ function showSettings() {
   </div>
 </div>
 
-<div class="modal-row" style="margin-top:4px">
-  <button class="mbtn" onclick="closeModal()">Cancel</button>
-  <button class="mbtn" onclick="resetSettings()" style="color:var(--red)">Reset</button>
-  <button class="mbtn ok" onclick="applySettings()">Save</button>
+<div class="modal-row" style="margin-top:20px;justify-content:space-between">
+  <button class="mbtn" onclick="resetSettings()" style="color:var(--red)">Reset to Defaults</button>
+  <div class="settings-version" style="padding-top:8px">Nova File Manager</div>
 </div>
-<div class="settings-version">Nova · v20</div>`;
+</div>`;
 
     // Wire gotify toggle live
     const gotifyChk = m.querySelector('#s-gotify');
@@ -3989,9 +4097,15 @@ function showSettings() {
       gotifyEnabled:   chk('s-gotify'),
       gotifyUrl:       val('s-gotify-url'),
       gotifyToken:     val('s-gotify-token'),
+      themeColor:      val('s-theme-color') || 'orange',
+      themeIconSize:   val('s-theme-icons') || 'normal',
+      themeFontSize:   val('s-theme-fonts') || 'normal',
     };
+    applyThemeOverrides(_settings);
     saveSettings(_settings);
-    closeModal();
+    const sv = document.getElementById('nova-settings-view');
+    if (sv) document.body.removeChild(sv);
+    else closeModal();
     reload();
     toast('✓ Settings saved');
   };
@@ -3999,8 +4113,8 @@ function showSettings() {
   window.resetSettings = function() {
     if (!confirm('Reset all settings to defaults?')) return;
     _settings = { ...SETTINGS_DEFAULTS };
+    applyThemeOverrides(_settings);
     saveSettings(_settings);
-    s.__proto__ = null;
     Object.assign(s, _settings);
     render();
     toast('Settings reset');
@@ -4011,6 +4125,28 @@ function showSettings() {
 
 // Expose settings to rest of app
 function getSetting(key) { return _settings[key] ?? SETTINGS_DEFAULTS[key]; }
+
+// Account update (called from settings panel)
+window.updateAccount = async function(btn) {
+  const user    = (document.getElementById('s-new-user')  || {}).value || '';
+  const pass    = (document.getElementById('s-new-pass')  || {}).value || '';
+  const confirm = (document.getElementById('s-new-pass-confirm') || {}).value || '';
+  const errEl   = document.getElementById('s-account-err');
+  if (errEl) { errEl.style.display = 'none'; errEl.textContent = ''; }
+  if (!user && !pass) { if (errEl) { errEl.textContent = 'Enter a new username or password.'; errEl.style.display = 'block'; } return; }
+  if (pass && pass !== confirm) { if (errEl) { errEl.textContent = 'Passwords do not match.'; errEl.style.display = 'block'; } return; }
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    await api('/api/account/update', { method: 'POST', body: JSON.stringify({ newUsername: user || undefined, newPassword: pass || undefined }) });
+    toast('✓ Account updated — please log in again');
+    const sv = document.getElementById('nova-settings-view');
+    if (sv) document.body.removeChild(sv);
+    setTimeout(() => { window.location.reload(); }, 1200);
+  } catch(e) {
+    btn.disabled = false; btn.textContent = 'Update Account';
+    if (errEl) { errEl.textContent = e.message || 'Update failed.'; errEl.style.display = 'block'; }
+  }
+};
 
 function toggleHidden() {
   _settings.showHidden = !_settings.showHidden;
@@ -4259,8 +4395,8 @@ function closeProgress() { document.getElementById('progress-panel').style.displ
 // ── Mounted drives sidebar ────────────────────────────────────────
 async function loadMounts() {
   try {
-    const r = await fetch('/api/mounts');
-    const d = await r.json();
+    const d = await api('/api/mounts');
+    if (!d) return; // 401 redirect handled by api()
     const mounts = (d.mounts || []).filter(m =>
       m.mountpoint && !m.mountpoint.startsWith('/proc') && !m.mountpoint.startsWith('/sys')
     );
@@ -4317,7 +4453,8 @@ async function loadMounts() {
 
 async function loadDisk() {
   try {
-    const r = await fetch('/api/diskinfo'); const d = await r.json();
+    const d = await api('/api/diskinfo');
+    if (!d) return;
     const pct = Math.round(d.used/d.total*100);
     document.getElementById('disk-fill').style.width = pct+'%';
     document.getElementById('disk-pct').textContent = pct+'% used';
