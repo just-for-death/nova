@@ -774,7 +774,7 @@ body.multiselect-mode .item-cb-list { opacity: 1 !important; }
   background: var(--surface2); user-select: none;
 }
 .fitem-gallery:hover { border-color: var(--border2); background: var(--surface3); }
-.fitem-gallery.sel { border-color: rgba(196,102,58,.45); background: var(--accentbg); }
+.fitem-gallery.sel { border-color: var(--accent); background: var(--accentbg); }
 .fitem-gallery.cut { opacity: .4; }
 .gallery-thumb {
   width: 100%; aspect-ratio: 16/10;
@@ -783,7 +783,8 @@ body.multiselect-mode .item-cb-list { opacity: 1 !important; }
   flex-shrink: 0; position: relative;
 }
 .gallery-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.gallery-thumb-icon { font-size: 40px; line-height: 1; opacity: .55; }
+.gallery-thumb-icon { display: flex; align-items: center; justify-content: center; }
+.gallery-thumb-icon svg { width: 48px; height: 48px; }
 .gallery-info { padding: 8px 10px 9px; display: flex; flex-direction: column; gap: 2px; }
 .gallery-name {
   font-size: 12.5px; color: var(--text); font-family: var(--font-sans);
@@ -1859,6 +1860,13 @@ const FILE_SVG = {
   symDir:   `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h4l2 2H17a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 17 17H3.5A1.5 1.5 0 0 1 2 15.5z" stroke="var(--accent)" stroke-width="1.4" fill="var(--accentbg)" stroke-linejoin="round" stroke-dasharray="2.5 1.5"/></svg>`,
   symFile:  `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M5 2h8l4 4v12a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z" stroke="var(--accent)" stroke-width="1.4" fill="none" stroke-dasharray="2.5 1.5"/></svg>`,
   symBroken:`<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M10 3v5M10 3l-2 2M10 3l2 2" stroke="var(--red)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><path d="M7 10h6M7 14h6M5 17h10" stroke="var(--red)" stroke-width="1.3" stroke-linecap="round" opacity=".5"/><circle cx="10" cy="12" r="5.5" stroke="var(--red)" stroke-width="1.4" fill="rgba(217,95,95,.08)"/></svg>`,
+  dirHome:  `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h4l2 2H17a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 17 17H3.5A1.5 1.5 0 0 1 2 15.5z" stroke="var(--accent)" stroke-width="1.4" fill="var(--accentbg)" stroke-linejoin="round"/><path d="M6.5 12.5l3-2.5 3 2.5v2.5h-2v-1.5h-2v1.5h-2z" stroke="var(--accent)" stroke-width="1.2" stroke-linejoin="round" fill="var(--accentbg)"/></svg>`,
+  dirConfig:`<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h4l2 2H17a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 17 17H3.5A1.5 1.5 0 0 1 2 15.5z" stroke="var(--accent)" stroke-width="1.4" fill="var(--accentbg)" stroke-linejoin="round"/><circle cx="9.5" cy="11.5" r="1.5" stroke="var(--accent)" stroke-width="1.2"/><path d="M9.5 9v1M9.5 13v1M7.5 11.5h1M10.5 11.5h1" stroke="var(--accent)" stroke-width="1.2" stroke-linecap="round"/></svg>`,
+  dirSystem:`<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h4l2 2H17a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 17 17H3.5A1.5 1.5 0 0 1 2 15.5z" stroke="var(--accent)" stroke-width="1.4" fill="var(--accentbg)" stroke-linejoin="round"/><rect x="6.5" y="9.5" width="6" height="4.5" rx="1" stroke="var(--accent)" stroke-width="1.2"/><path d="M8 14v1M11 14v1" stroke="var(--accent)" stroke-width="1.2" stroke-linecap="round"/></svg>`,
+  dirMedia: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h4l2 2H17a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 17 17H3.5A1.5 1.5 0 0 1 2 15.5z" stroke="var(--accent)" stroke-width="1.4" fill="var(--accentbg)" stroke-linejoin="round"/><rect x="6" y="10" width="7" height="3.5" rx="1" stroke="var(--accent)" stroke-width="1.2"/><circle cx="11" cy="11.75" r="0.5" fill="var(--accent)"/></svg>`,
+  dirTemp:  `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h4l2 2H17a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 17 17H3.5A1.5 1.5 0 0 1 2 15.5z" stroke="var(--accent)" stroke-width="1.4" fill="var(--accentbg)" stroke-linejoin="round"/><path d="M9.5 9.5v2l1.5 1" stroke="var(--accent)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="9.5" cy="11.5" r="2.5" stroke="var(--accent)" stroke-width="1.2"/></svg>`,
+  dirBackup:`<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h4l2 2H17a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 17 17H3.5A1.5 1.5 0 0 1 2 15.5z" stroke="var(--accent)" stroke-width="1.4" fill="var(--accentbg)" stroke-linejoin="round"/><path d="M12.5 11.5a3 3 0 1 1-6 0c0-1.5 1.5-3 3-3v1m0-1l-1.5-1M9.5 8.5l1.5-1" stroke="var(--accent)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  dirCode:  `<svg width="20" height="20" viewBox="0 0 20 20" fill="none"><path d="M2 5.5A1.5 1.5 0 0 1 3.5 4h4l2 2H17a1.5 1.5 0 0 1 1.5 1.5v8A1.5 1.5 0 0 1 17 17H3.5A1.5 1.5 0 0 1 2 15.5z" stroke="var(--accent)" stroke-width="1.4" fill="var(--accentbg)" stroke-linejoin="round"/><path d="M8 9.5l-1.5 1.5 1.5 1.5M11 9.5l1.5 1.5-1.5 1.5" stroke="var(--accent)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
 };
 
 function fileIcon(e) {
@@ -1871,7 +1879,17 @@ function fileIcon(e) {
     if (m.startsWith('audio/')) return FILE_SVG.audio;
     return FILE_SVG.symFile;
   }
-  if (e.type === 'directory') return FILE_SVG.dir;
+  if (e.type === 'directory') {
+    const n = e.name.toLowerCase();
+    if (['home','users', 'zoro', 'desktop', 'documents', 'downloads'].includes(n)) return FILE_SVG.dirHome;
+    if (['etc', '.config', 'config', '.settings'].includes(n)) return FILE_SVG.dirConfig;
+    if (['bin', 'sbin', 'boot', 'sys', 'proc', 'run', 'lib', 'lib64', 'opt', 'usr', 'var', 'srv'].includes(n)) return FILE_SVG.dirSystem;
+    if (['mnt', 'media', 'drives', 'hdd'].includes(n)) return FILE_SVG.dirMedia;
+    if (['tmp', 'temp', '.cache', 'cache'].includes(n)) return FILE_SVG.dirTemp;
+    if (['.snapshots', 'backups', 'backup'].includes(n)) return FILE_SVG.dirBackup;
+    if (['src', 'lib', 'scripts', '.vscode', '.idea', 'node_modules'].includes(n)) return FILE_SVG.dirCode;
+    return FILE_SVG.dir;
+  }
   const m = e.mime || '', x = e.name.split('.').pop().toLowerCase();
   if (m.startsWith('image/')) return FILE_SVG.img;
   if (m.startsWith('video/')) return FILE_SVG.video;
@@ -1994,8 +2012,8 @@ function galleryItem(e, cuts) {
   const isBroken = e.type === 'symlink-broken';
   const isDir    = e.type === 'directory' || e.type === 'symlink-dir';
   const thumbHtml = isImg
-    ? `<div class="gallery-thumb"><img src="/api/preview?path=${enc(e.path)}" loading="lazy" onerror="this.parentNode.innerHTML='<span class=gallery-thumb-icon>🖼</span>'"></div>`
-    : `<div class="gallery-thumb"><span class="gallery-thumb-icon">${isDir ? '📁' : isVideo ? '🎬' : fileIcon(e)}</span></div>`;
+    ? `<div class="gallery-thumb"><img src="/api/preview?path=${enc(e.path)}" loading="lazy" onerror="this.parentNode.innerHTML='<span class=gallery-thumb-icon>${FILE_SVG.img}</span>'"></div>`
+    : `<div class="gallery-thumb"><span class="gallery-thumb-icon">${fileIcon(e)}</span></div>`;
   const meta = isDir ? 'folder' : (e.size != null ? fmtSize(e.size) : '—');
   return `<div class="fitem-gallery ${s?'sel':''} ${c?'cut':''} ${isBroken?'sym-broken-item':''}" data-path="${esc(e.path)}" data-type="${esc(e.type)}">
     <div class="item-cb" style="z-index:3">${s?'✓':''}</div>
@@ -3892,17 +3910,19 @@ function applyThemeOverrides(s) {
 
   if (s.themeIconSize === 'large') {
     css += `.list-icon svg { width: 26px !important; height: 26px !important; } `;
-    css += `.grid-icon svg, .grid-thumb img { width: 58px !important; height: 58px !important; } `;
+    css += `.grid-icon svg, .grid-thumb img, .gallery-thumb-icon svg { width: 58px !important; height: 58px !important; } `;
     css += `.file-grid { grid-template-columns: repeat(auto-fill, minmax(145px, 1fr)) !important; } `;
+    css += `.file-gallery { grid-template-columns: repeat(auto-fill, minmax(215px, 1fr)) !important; } `;
   } else if (s.themeIconSize === 'xlarge') {
     css += `.list-icon svg { width: 34px !important; height: 34px !important; } `;
-    css += `.grid-icon svg, .grid-thumb img { width: 86px !important; height: 86px !important; } `;
+    css += `.grid-icon svg, .grid-thumb img, .gallery-thumb-icon svg { width: 86px !important; height: 86px !important; } `;
     css += `.file-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)) !important; } `;
+    css += `.file-gallery { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)) !important; } `;
   }
 
   if (s.themeFontSize === 'large') {
-    css += `body, .fitem-list, .grid-name, .tbar-btn, .sb-item { font-size: 16.5px !important; } `;
-    css += `.list-size, .list-date, .grid-size { font-size: 13px !important; } `;
+    css += `body, .fitem-list, .grid-name, .gallery-name, .tbar-btn, .sb-item { font-size: 16.5px !important; } `;
+    css += `.list-size, .list-date, .grid-size, .gallery-meta { font-size: 13px !important; } `;
     css += `.breadcrumb { font-size: 17px !important; } `;
   }
 

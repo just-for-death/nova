@@ -16,6 +16,8 @@ services:
       - LOG_LEVEL=info
       - LOG_FORMAT=pretty
       - COPY_WORKERS=4
+      - ADMIN_USER=admin
+      - ADMIN_PASS=MySecurePassword123!
       # Persistent secret to prevent session loss on restart
       - AUTH_SECRET=nova-persistent-secret-change-me-for-security
       # Gotify (optional) - push notifications for jobs + cancels + AI ops
